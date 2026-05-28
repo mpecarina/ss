@@ -275,6 +275,13 @@ impl App {
 
     fn footer(&self) -> Paragraph<'static> {
         let slide = self.current_slide();
+        let mode_status = if self.search_focus {
+            format!("/{}", self.search)
+        } else if self.outline_search_focus {
+            format!("/{}", self.outline_query)
+        } else {
+            self.status.clone()
+        };
         Paragraph::new(Line::from(vec![
             Span::styled(
                 format!(" {}/{} ", self.current + 1, self.deck.slides.len()),
@@ -301,7 +308,7 @@ impl App {
                 Style::default().fg(Color::DarkGray),
             ),
             Span::raw("  "),
-            Span::styled(self.status.clone(), Style::default().fg(Color::DarkGray)),
+            Span::styled(mode_status, Style::default().fg(Color::DarkGray)),
         ]))
     }
 
@@ -319,8 +326,13 @@ impl App {
                 self.outline = false;
             }
             KeyCode::Esc => {
-                self.help = false;
-                self.outline = false;
+                if self.help {
+                    self.help = false;
+                } else if self.outline {
+                    self.outline = false;
+                } else if !self.search.is_empty() {
+                    self.clear_search();
+                }
             }
             KeyCode::Char('o') => {
                 self.outline = !self.outline;
@@ -415,7 +427,13 @@ impl App {
 
     fn handle_search_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
-            KeyCode::Esc | KeyCode::Enter => self.search_focus = false,
+            KeyCode::Esc => {
+                self.search_focus = false;
+                if self.search.is_empty() {
+                    self.clear_search();
+                }
+            }
+            KeyCode::Enter => self.search_focus = false,
             KeyCode::Backspace => {
                 self.search.pop();
                 self.update_search_matches();
@@ -589,6 +607,14 @@ impl App {
         );
     }
 
+    fn clear_search(&mut self) {
+        self.search_focus = false;
+        self.search.clear();
+        self.search_matches.clear();
+        self.search_match_index = 0;
+        self.status.clear();
+    }
+
     fn scroll_text(&mut self, delta: isize) {
         let total = self
             .layout_for_current(self.text_rect.map(|rect| rect.width).unwrap_or(80))
@@ -748,5 +774,28 @@ mod tests {
 
         app.advance_search_match(-1);
         assert_eq!(app.search_match_index, 2);
+    }
+
+    #[test]
+    fn clear_search_resets_search_state() {
+        let mut app = App::new(
+            PathBuf::from("."),
+            sample_deck(),
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+        );
+        app.search = "world".to_string();
+        app.search_matches.push(SearchMatch {
+            row: 0,
+            start: 6,
+            len: 5,
+        });
+        app.status = "match 1/1 for /world".to_string();
+
+        app.clear_search();
+
+        assert!(app.search.is_empty());
+        assert!(app.search_matches.is_empty());
+        assert!(app.status.is_empty());
     }
 }
