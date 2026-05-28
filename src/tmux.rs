@@ -6,8 +6,6 @@ use anyhow::{Context, Result};
 pub struct TmuxContext {
     socket: String,
     pane_id: String,
-    window_id: String,
-    session_id: String,
 }
 
 impl TmuxContext {
@@ -15,8 +13,6 @@ impl TmuxContext {
         Self {
             socket: socket_path(),
             pane_id: std::env::var("SS_TMUX_PANE_ID").unwrap_or_default(),
-            window_id: std::env::var("SS_TMUX_WINDOW_ID").unwrap_or_default(),
-            session_id: std::env::var("SS_TMUX_SESSION_ID").unwrap_or_default(),
         }
     }
 

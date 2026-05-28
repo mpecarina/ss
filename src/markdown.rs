@@ -19,7 +19,7 @@ pub struct RenderedMarkdown {
 }
 
 pub fn render_markdown(content: &str) -> RenderedMarkdown {
-    let preprocessed = preprocess_images(content);
+    let mut preprocessed = preprocess_images(content);
     let table_lines = detect_pipe_tables(&preprocessed.content);
     if !table_lines.is_empty() {
         return RenderedMarkdown {
@@ -41,6 +41,8 @@ pub fn render_markdown(content: &str) -> RenderedMarkdown {
     let syntax_set = SyntaxSet::load_defaults_newlines();
     let theme = default_theme();
     let mut code_language = String::new();
+    let mut image_index = preprocessed.image_slots.len();
+    let mut in_image = false;
 
     for event in parser {
         match event {
@@ -89,6 +91,11 @@ pub fn render_markdown(content: &str) -> RenderedMarkdown {
                 }
                 Tag::Link { dest_url, .. } => {
                     link_target = Some(dest_url.to_string());
+                }
+                Tag::Image { .. } => {
+                    in_image = true;
+                    insert_image_slot(&mut lines, &mut spans, &mut preprocessed.image_slots, image_index);
+                    image_index += 1;
                 }
                 _ => {}
             },
@@ -141,9 +148,15 @@ pub fn render_markdown(content: &str) -> RenderedMarkdown {
                         ));
                     }
                 }
+                TagEnd::Image => {
+                    in_image = false;
+                }
                 _ => {}
             },
             Event::Text(text) => {
+                if in_image {
+                    continue;
+                }
                 if code_block {
                     if !spans.is_empty() {
                         lines.push(Line::from(std::mem::take(&mut spans)));
@@ -158,6 +171,9 @@ pub fn render_markdown(content: &str) -> RenderedMarkdown {
                 Style::default().fg(Color::Cyan).bg(Color::DarkGray),
             )),
             Event::SoftBreak | Event::HardBreak => {
+                if in_image {
+                    continue;
+                }
                 lines.push(Line::from(std::mem::take(&mut spans)));
             }
             Event::Rule => {
@@ -238,6 +254,25 @@ fn postprocess_image_slots(lines: Vec<Line<'static>>, mut image_slots: Vec<Image
 
     image_slots.truncate(slot_cursor.max(image_slots.len()));
     RenderedMarkdown { lines: out, image_slots }
+}
+
+fn insert_image_slot(
+    lines: &mut Vec<Line<'static>>,
+    spans: &mut Vec<Span<'static>>,
+    image_slots: &mut Vec<ImageSlot>,
+    image_index: usize,
+) {
+    if !spans.is_empty() {
+        lines.push(Line::from(std::mem::take(spans)));
+    }
+    if image_slots.len() <= image_index {
+        image_slots.push(ImageSlot {
+            image_index,
+            start_line: 0,
+            rows: 10,
+        });
+    }
+    lines.push(Line::from(Span::raw(format!("SS_IMAGE_SLOT_{}", image_index))));
 }
 
 fn parse_image_slot_marker(line: &str) -> Option<usize> {

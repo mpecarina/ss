@@ -11,7 +11,6 @@ pub struct Slide {
     pub name: String,
     pub title: String,
     pub content: String,
-    pub layout: String,
     pub images: Vec<ImageRef>,
 }
 
@@ -47,7 +46,7 @@ pub fn load_slides(dir: &Path) -> Result<Vec<Slide>> {
     let mut slides = Vec::with_capacity(paths.len());
     for path in paths {
         let raw = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        let (content, layout) = parse_frontmatter(&raw);
+        let (content, _layout) = parse_frontmatter(&raw);
         let title = first_heading(&content).unwrap_or_else(|| fallback_title(&path));
         let images = extract_images(&content, path.parent().unwrap_or(dir));
         slides.push(Slide {
@@ -55,7 +54,6 @@ pub fn load_slides(dir: &Path) -> Result<Vec<Slide>> {
             name: path.file_name().unwrap_or_default().to_string_lossy().to_string(),
             title,
             content,
-            layout,
             images,
         });
     }

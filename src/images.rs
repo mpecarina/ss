@@ -114,10 +114,6 @@ pub fn detect_backend(tmux: TmuxContext) -> Box<dyn ImageBackend> {
     Box::new(NoopBackend)
 }
 
-pub fn build_placement(image: &ImageRef, width: u16, height: u16) -> Option<ImagePlacement> {
-    build_placement_at(image, 2, 2, width, height)
-}
-
 pub fn build_placement_at(image: &ImageRef, row: u16, col: u16, width: u16, height: u16) -> Option<ImagePlacement> {
     if image.path.is_empty() {
         return None;
@@ -131,54 +127,6 @@ pub fn build_placement_at(image: &ImageRef, row: u16, col: u16, width: u16, heig
         image_id: 1,
         placement_id: 1,
     })
-}
-
-pub fn build_grid_placements(images: &[ImageRef], row: u16, col: u16, width: u16, height: u16) -> Vec<ImagePlacement> {
-    if images.is_empty() || width < 4 || height < 4 {
-        return Vec::new();
-    }
-
-    let count = images.len().min(4);
-    let mut placements = Vec::new();
-    match count {
-        1 => {
-            if let Some(mut placement) = build_placement_at(&images[0], row, col, width, height) {
-                placement.image_id = 1;
-                placement.placement_id = 1;
-                placements.push(placement);
-            }
-        }
-        2 => {
-            let half = height / 2;
-            for (index, image) in images.iter().take(2).enumerate() {
-                let top = if index == 0 { row } else { row + half };
-                let rows = if index == 0 { half.saturating_sub(1) } else { height.saturating_sub(half).saturating_sub(1) };
-                if let Some(mut placement) = build_placement_at(image, top, col, width, rows.max(6)) {
-                    placement.image_id = (index + 1) as u32;
-                    placement.placement_id = (index + 1) as u32;
-                    placements.push(placement);
-                }
-            }
-        }
-        _ => {
-            let half_w = width / 2;
-            let half_h = height / 2;
-            for (index, image) in images.iter().take(count).enumerate() {
-                let r = index / 2;
-                let c = index % 2;
-                let top = row + (r as u16 * half_h);
-                let left = col + (c as u16 * half_w);
-                let cols = if c == 0 { half_w.saturating_sub(1) } else { width.saturating_sub(half_w).saturating_sub(1) };
-                let rows = if r == 0 { half_h.saturating_sub(1) } else { height.saturating_sub(half_h).saturating_sub(1) };
-                if let Some(mut placement) = build_placement_at(image, top, left, cols.max(10), rows.max(6)) {
-                    placement.image_id = (index + 1) as u32;
-                    placement.placement_id = (index + 1) as u32;
-                    placements.push(placement);
-                }
-            }
-        }
-    }
-    placements
 }
 
 fn wrap_for_tmux(seq: &str, tmux: &TmuxContext) -> String {
