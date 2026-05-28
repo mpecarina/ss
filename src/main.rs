@@ -1,5 +1,6 @@
 mod app;
 mod images;
+mod markdown;
 mod slides;
 mod tmux;
 

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{execute, ExecutableCommand};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -13,7 +13,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Terminal;
 
-use crate::images::{build_placement, detect_backend, ImageBackend};
+use crate::images::{build_placement_at, detect_backend, ImageBackend};
+use crate::markdown::render_markdown;
 use crate::slides::{load_slides, Slide};
 use crate::tmux::TmuxContext;
 
@@ -47,6 +48,8 @@ struct App {
     outline_query: String,
     match_index: usize,
     matches: Vec<(usize, usize)>,
+    text_scroll: usize,
+    body_rows: usize,
     outline_filtered: Vec<usize>,
     outline_index: usize,
     outline_scroll: usize,
@@ -72,6 +75,8 @@ impl App {
             outline_query: String::new(),
             match_index: 0,
             matches: Vec::new(),
+            text_scroll: 0,
+            body_rows: 0,
             outline_filtered: Vec::new(),
             outline_index: 0,
             outline_scroll: 0,
@@ -151,6 +156,22 @@ impl App {
             KeyCode::Char('N') => {
                 self.jump_search(-1);
             }
+            KeyCode::Char('d') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                if self.outline {
+                    self.outline_scroll = self.outline_scroll.saturating_add(self.outline_page_size() / 2);
+                    self.ensure_outline_visible();
+                } else {
+                    self.scroll_text((self.body_rows.max(2) / 2) as isize);
+                }
+            }
+            KeyCode::Char('u') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                if self.outline {
+                    self.outline_scroll = self.outline_scroll.saturating_sub(self.outline_page_size() / 2);
+                    self.ensure_outline_visible();
+                } else {
+                    self.scroll_text(-((self.body_rows.max(2) / 2) as isize));
+                }
+            }
             KeyCode::Char('r') => {
                 self.clear_images(stdout)?;
                 self.reload_slides()?;
@@ -168,6 +189,7 @@ impl App {
                     self.clear_images(stdout)?;
                     self.current = 0;
                     self.pending_g = false;
+                    self.text_scroll = 0;
                     self.refresh_matches();
                 } else {
                     self.pending_g = true;
@@ -182,6 +204,7 @@ impl App {
                 } else {
                     self.clear_images(stdout)?;
                     self.current = self.slides.len().saturating_sub(1);
+                    self.text_scroll = 0;
                     self.refresh_matches();
                 }
             }
@@ -192,11 +215,13 @@ impl App {
                         self.clear_images(stdout)?;
                         self.current = self.outline_filtered[self.outline_index.min(self.outline_filtered.len() - 1)];
                         self.outline = false;
+                        self.text_scroll = 0;
                         self.refresh_matches();
                     }
                 } else if self.current + 1 < self.slides.len() {
                     self.clear_images(stdout)?;
                     self.current += 1;
+                    self.text_scroll = 0;
                     self.refresh_matches();
                 }
             }
@@ -210,6 +235,7 @@ impl App {
                 } else if self.current > 0 {
                     self.clear_images(stdout)?;
                     self.current -= 1;
+                    self.text_scroll = 0;
                     self.refresh_matches();
                 }
             }
@@ -272,18 +298,52 @@ impl App {
         }
 
         let size = frame.area();
-        let chunks = Layout::default()
+        let vertical = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(2)])
             .split(size);
 
         let slide = &self.slides[self.current];
-        let lines = self.highlighted_lines(&slide.content);
-        let body = Paragraph::new(lines)
+        let image_first = slide.layout == "image" || slide.layout == "fullscreen-image";
+        let body_chunks = if !slide.images.is_empty() {
+            if image_first {
+                Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
+                    .split(vertical[0])
+            } else {
+                Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                    .split(vertical[0])
+            }
+        } else {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(100), Constraint::Percentage(0)])
+                .split(vertical[0])
+        };
+
+        self.body_rows = body_chunks[0].height.saturating_sub(2) as usize;
+
+        let lines = self.highlighted_markdown(&slide.content);
+        let viewport = self.viewport_lines(lines, self.body_rows);
+        let body = Paragraph::new(viewport)
             .block(Block::default().title(slide.title.clone()).borders(Borders::ALL))
             .wrap(Wrap { trim: false });
-        frame.render_widget(body, chunks[0]);
-        frame.render_widget(self.footer(slide), chunks[1]);
+        frame.render_widget(body, body_chunks[0]);
+
+        if !slide.images.is_empty() {
+            let image_title = if image_first { "Image" } else { "Preview" };
+            let image_panel = Paragraph::new(vec![Line::from(Span::styled(
+                slide.images[0].path.clone(),
+                Style::default().fg(Color::DarkGray),
+            ))])
+            .block(Block::default().title(image_title).borders(Borders::ALL));
+            frame.render_widget(image_panel, body_chunks[1]);
+        }
+
+        frame.render_widget(self.footer(slide), vertical[1]);
     }
 
     fn draw_outline(&mut self, frame: &mut ratatui::Frame) {
@@ -358,35 +418,47 @@ impl App {
             Span::raw("  "),
             Span::styled(search_status, Style::default().fg(Color::Yellow)),
             Span::raw("  "),
+            Span::styled(self.scroll_status(), Style::default().fg(Color::Magenta)),
+            Span::raw("  "),
             Span::styled(self.status.clone(), Style::default().fg(Color::DarkGray)),
         ]);
         Paragraph::new(line)
     }
 
-    fn highlighted_lines(&self, text: &str) -> Vec<Line<'static>> {
+    fn highlighted_markdown(&self, text: &str) -> Vec<Line<'static>> {
+        let lines = render_markdown(text);
         if self.search.is_empty() || self.matches.is_empty() {
-            return text.lines().map(|line| Line::from(line.to_string())).collect();
+            return lines;
         }
 
-        let mut spans = Vec::new();
-        let mut start = 0;
-        for (index, (match_start, match_end)) in self.matches.iter().enumerate() {
-            if *match_start > start {
-                spans.push(Span::raw(text[start..*match_start].to_string()));
+        let mut flat = String::new();
+        let mut ranges = Vec::new();
+        for line in &lines {
+            let line_start = flat.len();
+            for span in line.spans.iter() {
+                flat.push_str(span.content.as_ref());
             }
-            let style = if index == self.match_index {
-                Style::default().fg(Color::Black).bg(Color::Yellow)
-            } else {
-                Style::default().add_modifier(Modifier::REVERSED)
-            };
-            spans.push(Span::styled(text[*match_start..*match_end].to_string(), style));
-            start = *match_end;
-        }
-        if start < text.len() {
-            spans.push(Span::raw(text[start..].to_string()));
+            ranges.push((line_start, flat.len()));
+            flat.push('\n');
         }
 
-        vec![Line::from(spans)]
+        let mut highlighted = Vec::new();
+        for (line_index, line) in lines.into_iter().enumerate() {
+            let (line_start, line_end) = ranges[line_index];
+            let mut line_matches = Vec::new();
+            for (index, (start, end)) in self.matches.iter().enumerate() {
+                if *start < line_end && *end > line_start {
+                    line_matches.push((index, start.saturating_sub(line_start), end.saturating_sub(line_start)));
+                }
+            }
+            if line_matches.is_empty() {
+                highlighted.push(line);
+                continue;
+            }
+
+            highlighted.push(Line::from(highlight_line_spans(line.spans, line_matches, self.match_index)));
+        }
+        highlighted
     }
 
     fn refresh_matches(&mut self) {
@@ -396,6 +468,7 @@ impl App {
         } else if self.match_index >= self.matches.len() {
             self.match_index = 0;
         }
+        self.ensure_current_match_visible();
     }
 
     fn jump_search(&mut self, delta: isize) {
@@ -411,6 +484,76 @@ impl App {
             next = 0;
         }
         self.match_index = next as usize;
+        self.ensure_current_match_visible();
+    }
+
+    fn viewport_lines(&self, lines: Vec<Line<'static>>, body_rows: usize) -> Vec<Line<'static>> {
+        if body_rows == 0 || lines.len() <= body_rows {
+            return lines;
+        }
+        let max_scroll = lines.len().saturating_sub(body_rows);
+        let scroll = self.text_scroll.min(max_scroll);
+        lines.into_iter().skip(scroll).take(body_rows).collect()
+    }
+
+    fn scroll_text(&mut self, delta: isize) {
+        if self.body_rows == 0 {
+            return;
+        }
+        let total = self.highlighted_markdown(&self.slides[self.current].content).len();
+        let max_scroll = total.saturating_sub(self.body_rows);
+        let next = if delta < 0 {
+            self.text_scroll.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.text_scroll.saturating_add(delta as usize)
+        };
+        self.text_scroll = next.min(max_scroll);
+    }
+
+    fn scroll_status(&self) -> String {
+        if self.body_rows == 0 {
+            return String::new();
+        }
+        let total = self.highlighted_markdown(&self.slides[self.current].content).len();
+        if total <= self.body_rows {
+            return String::new();
+        }
+        let below = total.saturating_sub(self.text_scroll + self.body_rows);
+        format!("scroll:{} down:{}", self.text_scroll, below)
+    }
+
+    fn ensure_current_match_visible(&mut self) {
+        if self.matches.is_empty() || self.body_rows == 0 {
+            return;
+        }
+        let rendered = render_markdown(&self.slides[self.current].content);
+        let mut flat = String::new();
+        let mut line_ranges = Vec::new();
+        for line in &rendered {
+            let start = flat.len();
+            for span in line.spans.iter() {
+                flat.push_str(span.content.as_ref());
+            }
+            line_ranges.push((start, flat.len()));
+            flat.push('\n');
+        }
+        let current = self.matches[self.match_index];
+        let mut line_index = 0usize;
+        for (idx, (start, end)) in line_ranges.iter().enumerate() {
+            if current.0 < *end && current.1 > *start {
+                line_index = idx;
+                break;
+            }
+        }
+        if line_index < self.text_scroll {
+            self.text_scroll = line_index;
+        } else if line_index >= self.text_scroll + self.body_rows {
+            self.text_scroll = line_index.saturating_sub(self.body_rows - 1);
+        }
+    }
+
+    fn outline_page_size(&self) -> usize {
+        12
     }
 
     fn recompute_outline(&mut self) {
@@ -464,10 +607,19 @@ impl App {
             return Ok(());
         }
         let slide = &self.slides[self.current];
-        let Some(placement) = build_placement(
+        let size = terminal::size().unwrap_or((120, 40));
+        let image_first = slide.layout == "image" || slide.layout == "fullscreen-image";
+        let (row, col, cols, rows) = if image_first {
+            (2u16, size.0.saturating_sub((size.0 * 75) / 100).saturating_add(2), (size.0 * 75 / 100).saturating_sub(4), size.1.saturating_sub(8))
+        } else {
+            (2u16, (size.0 * 60 / 100).saturating_add(2), (size.0 * 40 / 100).saturating_sub(4), size.1.saturating_sub(8))
+        };
+        let Some(placement) = build_placement_at(
             slide.images.first().unwrap_or(&Default::default()),
-            100,
-            30,
+            row,
+            col,
+            cols,
+            rows,
         ) else {
             return Ok(());
         };
@@ -502,6 +654,54 @@ impl App {
         }
         Ok(())
     }
+}
+
+fn highlight_line_spans(
+    spans: Vec<Span<'static>>,
+    matches: Vec<(usize, usize, usize)>,
+    active_match_index: usize,
+) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut global_offset = 0usize;
+
+    for span in spans {
+        let text = span.content.to_string();
+        let span_start = global_offset;
+        let span_end = global_offset + text.len();
+        let relevant = matches
+            .iter()
+            .filter(|(_, start, end)| *start < span_end && *end > span_start)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if relevant.is_empty() {
+            out.push(span.clone());
+            global_offset = span_end;
+            continue;
+        }
+
+        let mut cursor = 0usize;
+        for (match_id, start, end) in relevant {
+            let local_start = start.saturating_sub(span_start).min(text.len());
+            let local_end = end.saturating_sub(span_start).min(text.len());
+            if local_start > cursor {
+                out.push(Span::styled(text[cursor..local_start].to_string(), span.style));
+            }
+            let highlight_style = if match_id == active_match_index {
+                span.style.fg(Color::Black).bg(Color::Yellow)
+            } else {
+                span.style.add_modifier(Modifier::REVERSED)
+            };
+            out.push(Span::styled(text[local_start..local_end].to_string(), highlight_style));
+            cursor = local_end;
+        }
+        if cursor < text.len() {
+            out.push(Span::styled(text[cursor..].to_string(), span.style));
+        }
+        global_offset = span_end;
+    }
+
+    out
 }
 
 fn find_matches(text: &str, query: &str) -> Vec<(usize, usize)> {
@@ -542,5 +742,47 @@ mod tests {
         app.match_index = 1;
         app.jump_search(1);
         assert_eq!(app.match_index, 0);
+    }
+
+    #[test]
+    fn viewport_lines_scrolls() {
+        let app = App::new(PathBuf::from("."), vec![Slide::default()], TmuxContext::default(), Box::new(NoopBackend));
+        let lines = vec![
+            Line::from("one"),
+            Line::from("two"),
+            Line::from("three"),
+        ];
+        let mut app = app;
+        app.text_scroll = 1;
+        let view = app.viewport_lines(lines, 2);
+        assert_eq!(view.len(), 2);
+    }
+
+    #[test]
+    fn ensure_current_match_visible_moves_scroll() {
+        let mut app = App::new(
+            PathBuf::from("."),
+            vec![Slide {
+                content: "line1\nline2\nline3\nline4\nline5".to_string(),
+                ..Slide::default()
+            }],
+            TmuxContext::default(),
+            Box::new(NoopBackend),
+        );
+        app.search = "line4".to_string();
+        app.body_rows = 2;
+        app.refresh_matches();
+        assert!(app.text_scroll > 0);
+    }
+
+    #[test]
+    fn highlight_line_spans_preserves_non_match_segments() {
+        let spans = vec![
+            Span::styled("abc".to_string(), Style::default().fg(Color::Red)),
+            Span::styled("def".to_string(), Style::default().fg(Color::Blue)),
+        ];
+        let highlighted = highlight_line_spans(spans, vec![(0, 2, 4)], 0);
+        assert!(highlighted.len() >= 3);
+        assert_eq!(highlighted[0].content, "ab");
     }
 }

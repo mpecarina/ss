@@ -115,15 +115,19 @@ pub fn detect_backend(tmux: TmuxContext) -> Box<dyn ImageBackend> {
 }
 
 pub fn build_placement(image: &ImageRef, width: u16, height: u16) -> Option<ImagePlacement> {
+    build_placement_at(image, 2, 2, width, height)
+}
+
+pub fn build_placement_at(image: &ImageRef, row: u16, col: u16, width: u16, height: u16) -> Option<ImagePlacement> {
     if image.path.is_empty() {
         return None;
     }
     Some(ImagePlacement {
         path: image.path.clone(),
-        row: 2,
-        col: 2,
-        cols: width.saturating_sub(4).max(10),
-        rows: height.saturating_sub(6).max(6),
+        row,
+        col,
+        cols: width.max(10),
+        rows: height.max(6),
         image_id: 1,
         placement_id: 1,
     })
