@@ -1,6 +1,8 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
+use base64::Engine;
+
 use crate::slides::ImageRef;
 use crate::tmux::TmuxContext;
 
@@ -138,27 +140,5 @@ fn wrap_for_tmux(seq: &str, tmux: &TmuxContext) -> String {
 }
 
 fn base64_path(path: &str) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let bytes = path.as_bytes();
-    let mut out = String::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        let b0 = bytes[i];
-        let b1 = if i + 1 < bytes.len() { bytes[i + 1] } else { 0 };
-        let b2 = if i + 2 < bytes.len() { bytes[i + 2] } else { 0 };
-        out.push(TABLE[(b0 >> 2) as usize] as char);
-        out.push(TABLE[(((b0 & 0b11) << 4) | (b1 >> 4)) as usize] as char);
-        if i + 1 < bytes.len() {
-            out.push(TABLE[(((b1 & 0b1111) << 2) | (b2 >> 6)) as usize] as char);
-        } else {
-            out.push('=');
-        }
-        if i + 2 < bytes.len() {
-            out.push(TABLE[(b2 & 0b0011_1111) as usize] as char);
-        } else {
-            out.push('=');
-        }
-        i += 3;
-    }
-    out
+    base64::engine::general_purpose::STANDARD.encode(path.as_bytes())
 }
