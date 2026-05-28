@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -25,6 +27,8 @@ pub struct VisibilityState {
     pub session_attached: bool,
     pub window_active: bool,
     pub pane_active: bool,
+    pub pane_top: u16,
+    pub pane_left: u16,
 }
 
 impl VisibilityState {
@@ -36,17 +40,14 @@ impl VisibilityState {
 impl TmuxRuntime {
     pub fn detect() -> Self {
         let socket = std::env::var("SS_TMUX_SOCKET").unwrap_or_else(|_| socket_path());
-        let pane_id = std::env::var("SS_TMUX_PANE_ID")
-            .ok()
-            .or_else(|| current_format(&socket, "#{pane_id}"))
+        let pane_id = current_format(&socket, "#{pane_id}")
+            .or_else(|| std::env::var("SS_TMUX_PANE_ID").ok())
             .unwrap_or_default();
-        let window_id = std::env::var("SS_TMUX_WINDOW_ID")
-            .ok()
-            .or_else(|| current_format(&socket, "#{window_id}"))
+        let window_id = current_format(&socket, "#{window_id}")
+            .or_else(|| std::env::var("SS_TMUX_WINDOW_ID").ok())
             .unwrap_or_default();
-        let session_id = std::env::var("SS_TMUX_SESSION_ID")
-            .ok()
-            .or_else(|| current_format(&socket, "#{session_id}"))
+        let session_id = current_format(&socket, "#{session_id}")
+            .or_else(|| std::env::var("SS_TMUX_SESSION_ID").ok())
             .unwrap_or_default();
         let launch_mode = match std::env::var("SS_LAUNCH_MODE").unwrap_or_default().as_str() {
             "window" => LaunchMode::Window,
@@ -76,20 +77,44 @@ impl TmuxRuntime {
                 session_attached: true,
                 window_active: true,
                 pane_active: true,
+                pane_top: 0,
+                pane_left: 0,
             });
         }
-        let output = self.output(&[
+
+        let target = self.output(&[
             "display-message",
             "-p",
             "-t",
             self.pane_id.as_str(),
-            "#{session_attached}|#{window_active}|#{pane_active}",
+            "#{session_attached}|#{pane_top}|#{pane_left}",
         ])?;
-        let mut parts = output.trim().split('|');
+        let active = self.output(&[
+            "display-message",
+            "-p",
+            "#{session_id}|#{window_id}|#{pane_id}",
+        ])?;
+
+        let mut target_parts = target.trim().split('|');
+        let mut active_parts = active.trim().split('|');
+        let active_session_id = active_parts.next().unwrap_or_default();
+        let active_window_id = active_parts.next().unwrap_or_default();
+        let active_pane_id = active_parts.next().unwrap_or_default();
         Ok(VisibilityState {
-            session_attached: parts.next().unwrap_or("0") != "0",
-            window_active: parts.next().unwrap_or("0") == "1",
-            pane_active: parts.next().unwrap_or("0") == "1",
+            session_attached: target_parts.next().unwrap_or("0") != "0"
+                && active_session_id == self.session_id,
+            window_active: active_window_id == self.window_id,
+            pane_active: active_pane_id == self.pane_id,
+            pane_top: target_parts
+                .next()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or_default(),
+            pane_left: target_parts
+                .next()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or_default(),
         })
     }
 
@@ -99,6 +124,26 @@ impl TmuxRuntime {
         }
         let escaped = seq.replace('\x1b', "\x1b\x1b");
         format!("\x1bPtmux;{}\x1b\\", escaped)
+    }
+
+    pub fn client_terminal(&self) -> Option<String> {
+        if !self.in_tmux() {
+            return None;
+        }
+
+        let term = self
+            .output(&[
+                "display-message",
+                "-p",
+                "#{client_termname}|#{client_termtype}",
+            ])
+            .ok()?;
+        let combined = term.trim().to_lowercase();
+        if combined.is_empty() || combined == "|" {
+            None
+        } else {
+            Some(combined)
+        }
     }
 
     pub fn output(&self, args: &[&str]) -> Result<String> {

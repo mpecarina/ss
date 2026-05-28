@@ -206,17 +206,18 @@ pub fn detect_backend(tmux: &TmuxRuntime) -> Box<dyn ImageBackend> {
         .unwrap_or_default()
         .to_lowercase();
     let term = std::env::var("TERM").unwrap_or_default().to_lowercase();
+    let tmux_client = tmux.client_terminal().unwrap_or_default();
     let explicit_kitty = std::env::var("KITTY_WINDOW_ID").is_ok();
     let explicit_ghostty = term_program == "ghostty" || std::env::var("GHOSTTY_BIN_DIR").is_ok();
+    let tmux_client_supports_graphics =
+        tmux_client.contains("kitty") || tmux_client.contains("ghostty");
     if term_program == "ghostty"
         || term.contains("ghostty")
         || term.contains("kitty")
         || explicit_kitty
         || explicit_ghostty
+        || tmux_client_supports_graphics
     {
-        if tmux.in_tmux() && !explicit_kitty && !explicit_ghostty {
-            return Box::new(NoopBackend);
-        }
         return Box::new(KittyBackend::new(tmux.clone()));
     }
     Box::new(NoopBackend)
@@ -229,6 +230,8 @@ pub fn placements_for_view(
     body_y: u16,
     body_x: u16,
     body_height: u16,
+    pane_y: u16,
+    pane_x: u16,
 ) -> Vec<ImagePlacementSpec> {
     images
         .iter()
@@ -244,8 +247,11 @@ pub fn placements_for_view(
             Some(ImagePlacementSpec {
                 block_id: image.block_id,
                 asset_path: asset.path.to_string_lossy().to_string(),
-                row: body_y.saturating_add(local_row).saturating_add(1),
-                col: body_x.saturating_add(1),
+                row: pane_y
+                    .saturating_add(body_y)
+                    .saturating_add(local_row)
+                    .saturating_add(1),
+                col: pane_x.saturating_add(body_x).saturating_add(1),
                 cols: image.cols,
                 rows: image.rows.min(body_height as usize) as u16,
             })

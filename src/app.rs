@@ -483,6 +483,8 @@ impl App {
             text_rect.y,
             text_rect.x,
             text_rect.height,
+            self.visibility.pane_top,
+            self.visibility.pane_left,
         );
         let diff = self.compositor.reconcile(placements);
         if !diff.retire.is_empty() {
