@@ -4,17 +4,18 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
-use crossterm::terminal::{self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{execute, ExecutableCommand};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Terminal;
 
-use crate::images::{build_placement_at, detect_backend, ImageBackend};
-use crate::markdown::render_markdown;
+use crate::images::{build_placement_at, detect_backend, ImageBackend, ImagePlacement};
+use crate::markdown::{render_markdown, ImageSlot, RenderedMarkdown};
 use crate::slides::{load_slides, Slide};
 use crate::tmux::TmuxContext;
 
@@ -56,6 +57,8 @@ struct App {
     tmux: TmuxContext,
     image_backend: Box<dyn ImageBackend>,
     images_visible: bool,
+    image_rect: Option<Rect>,
+    inline_image_slots: Vec<ImageSlot>,
     last_focus_poll: Instant,
     pending_g: bool,
 }
@@ -83,6 +86,8 @@ impl App {
             tmux,
             image_backend,
             images_visible: false,
+            image_rect: None,
+            inline_image_slots: Vec::new(),
             last_focus_poll: Instant::now(),
             pending_g: false,
         };
@@ -289,10 +294,12 @@ impl App {
 
     fn draw(&mut self, frame: &mut ratatui::Frame) {
         if self.help {
+            self.image_rect = None;
             self.draw_help(frame);
             return;
         }
         if self.outline {
+            self.image_rect = None;
             self.draw_outline(frame);
             return;
         }
@@ -300,48 +307,33 @@ impl App {
         let size = frame.area();
         let vertical = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(2)])
+            .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(2)])
             .split(size);
 
         let slide = &self.slides[self.current];
-        let image_first = slide.layout == "image" || slide.layout == "fullscreen-image";
-        let body_chunks = if !slide.images.is_empty() {
-            if image_first {
-                Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
-                    .split(vertical[0])
-            } else {
-                Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-                    .split(vertical[0])
-            }
-        } else {
-            Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(100), Constraint::Percentage(0)])
-                .split(vertical[0])
-        };
+        let header = Paragraph::new(Line::from(vec![
+            Span::styled(" ss ", Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+            Span::styled(slide.title.clone(), Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw("  "),
+            Span::styled(slide.name.clone(), Style::default().fg(Color::DarkGray)),
+        ]));
+        frame.render_widget(header, vertical[0]);
 
-        self.body_rows = body_chunks[0].height.saturating_sub(2) as usize;
+        let body_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(100), Constraint::Percentage(0)])
+            .split(vertical[1]);
 
-        let lines = self.highlighted_markdown(&slide.content);
-        let viewport = self.viewport_lines(lines, self.body_rows);
-        let body = Paragraph::new(viewport)
-            .block(Block::default().title(slide.title.clone()).borders(Borders::ALL))
-            .wrap(Wrap { trim: false });
+        self.image_rect = None;
+
+        self.body_rows = body_chunks[0].height as usize;
+
+        let rendered = self.highlighted_markdown(&slide.content);
+        self.inline_image_slots = rendered.image_slots.clone();
+        let viewport = self.viewport_lines(rendered.lines, self.body_rows);
+        let body = Paragraph::new(viewport).wrap(Wrap { trim: false });
         frame.render_widget(body, body_chunks[0]);
-
-        if !slide.images.is_empty() {
-            let image_title = if image_first { "Image" } else { "Preview" };
-            let image_panel = Paragraph::new(vec![Line::from(Span::styled(
-                slide.images[0].path.clone(),
-                Style::default().fg(Color::DarkGray),
-            ))])
-            .block(Block::default().title(image_title).borders(Borders::ALL));
-            frame.render_widget(image_panel, body_chunks[1]);
-        }
 
         frame.render_widget(self.footer(slide), vertical[1]);
     }
@@ -350,7 +342,7 @@ impl App {
         let size = frame.area();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(2)])
+            .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
             .split(size);
 
         let query = if self.outline_search_focus {
@@ -366,21 +358,35 @@ impl App {
         for (visible_index, slide_index) in self.outline_filtered[self.outline_scroll..end].iter().enumerate() {
             let absolute = self.outline_scroll + visible_index;
             let slide = &self.slides[*slide_index];
-            let style = if absolute == self.outline_index {
-                Style::default().fg(Color::Black).bg(Color::White)
+            let index_style = if absolute == self.outline_index {
+                Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            let title_style = if absolute == self.outline_index {
+                Style::default().add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
-            lines.push(Line::from(Span::styled(
-                format!("[{:<2}] {} | {}", slide_index + 1, slide.title, slide.name),
-                style,
-            )));
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {:>2} ", slide_index + 1), index_style),
+                Span::raw(" "),
+                Span::styled(slide.title.clone(), title_style),
+                Span::raw("  "),
+                Span::styled(slide.name.clone(), Style::default().fg(Color::DarkGray)),
+            ]));
         }
         if lines.is_empty() {
             lines.push(Line::from(Span::styled("no slides matched", Style::default().fg(Color::DarkGray))));
         }
         frame.render_widget(Paragraph::new(lines), chunks[1]);
-        frame.render_widget(Paragraph::new("/ filter  enter open  j/k move  esc close  q quit"), chunks[2]);
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                format!("{}/{} slides  / filter  enter open  j/k move  esc close", self.outline_filtered.len(), self.slides.len()),
+                Style::default().fg(Color::DarkGray),
+            )),
+            chunks[2],
+        );
     }
 
     fn draw_help(&self, frame: &mut ratatui::Frame) {
@@ -394,8 +400,7 @@ impl App {
             Line::from(""),
             Line::from("tmux-aware popup: images clear when pane/window loses focus"),
         ];
-        let block = Paragraph::new(text).block(Block::default().title("Help").borders(Borders::ALL));
-        frame.render_widget(block, frame.area());
+        frame.render_widget(Paragraph::new(text), frame.area());
     }
 
     fn footer(&self, slide: &Slide) -> Paragraph<'static> {
@@ -412,9 +417,9 @@ impl App {
                 Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
-            Span::raw(slide.name.clone()),
-            Span::raw("  "),
             Span::styled(format!("backend:{}", self.image_backend.name()), Style::default().fg(Color::Cyan)),
+            Span::raw("  "),
+            Span::styled(format!("images:{}", slide.images.len()), Style::default().fg(Color::Blue)),
             Span::raw("  "),
             Span::styled(search_status, Style::default().fg(Color::Yellow)),
             Span::raw("  "),
@@ -425,15 +430,15 @@ impl App {
         Paragraph::new(line)
     }
 
-    fn highlighted_markdown(&self, text: &str) -> Vec<Line<'static>> {
-        let lines = render_markdown(text);
+    fn highlighted_markdown(&self, text: &str) -> RenderedMarkdown {
+        let rendered = render_markdown(text);
         if self.search.is_empty() || self.matches.is_empty() {
-            return lines;
+            return rendered;
         }
 
         let mut flat = String::new();
         let mut ranges = Vec::new();
-        for line in &lines {
+        for line in &rendered.lines {
             let line_start = flat.len();
             for span in line.spans.iter() {
                 flat.push_str(span.content.as_ref());
@@ -443,7 +448,7 @@ impl App {
         }
 
         let mut highlighted = Vec::new();
-        for (line_index, line) in lines.into_iter().enumerate() {
+        for (line_index, line) in rendered.lines.into_iter().enumerate() {
             let (line_start, line_end) = ranges[line_index];
             let mut line_matches = Vec::new();
             for (index, (start, end)) in self.matches.iter().enumerate() {
@@ -458,7 +463,10 @@ impl App {
 
             highlighted.push(Line::from(highlight_line_spans(line.spans, line_matches, self.match_index)));
         }
-        highlighted
+        RenderedMarkdown {
+            lines: highlighted,
+            image_slots: rendered.image_slots,
+        }
     }
 
     fn refresh_matches(&mut self) {
@@ -500,7 +508,7 @@ impl App {
         if self.body_rows == 0 {
             return;
         }
-        let total = self.highlighted_markdown(&self.slides[self.current].content).len();
+        let total = self.highlighted_markdown(&self.slides[self.current].content).lines.len();
         let max_scroll = total.saturating_sub(self.body_rows);
         let next = if delta < 0 {
             self.text_scroll.saturating_sub(delta.unsigned_abs())
@@ -514,7 +522,7 @@ impl App {
         if self.body_rows == 0 {
             return String::new();
         }
-        let total = self.highlighted_markdown(&self.slides[self.current].content).len();
+        let total = self.highlighted_markdown(&self.slides[self.current].content).lines.len();
         if total <= self.body_rows {
             return String::new();
         }
@@ -529,7 +537,7 @@ impl App {
         let rendered = render_markdown(&self.slides[self.current].content);
         let mut flat = String::new();
         let mut line_ranges = Vec::new();
-        for line in &rendered {
+        for line in &rendered.lines {
             let start = flat.len();
             for span in line.spans.iter() {
                 flat.push_str(span.content.as_ref());
@@ -607,27 +615,40 @@ impl App {
             return Ok(());
         }
         let slide = &self.slides[self.current];
-        let size = terminal::size().unwrap_or((120, 40));
-        let image_first = slide.layout == "image" || slide.layout == "fullscreen-image";
-        let (row, col, cols, rows) = if image_first {
-            (2u16, size.0.saturating_sub((size.0 * 75) / 100).saturating_add(2), (size.0 * 75 / 100).saturating_sub(4), size.1.saturating_sub(8))
-        } else {
-            (2u16, (size.0 * 60 / 100).saturating_add(2), (size.0 * 40 / 100).saturating_sub(4), size.1.saturating_sub(8))
-        };
-        let Some(placement) = build_placement_at(
-            slide.images.first().unwrap_or(&Default::default()),
-            row,
-            col,
-            cols,
-            rows,
-        ) else {
+        let placements = self.inline_image_placements(slide);
+        if placements.is_empty() {
             return Ok(());
-        };
+        }
 
-        stdout.execute(crossterm::style::Print(self.image_backend.draw_sequence(&[placement])))?;
+        stdout.execute(crossterm::style::Print(self.image_backend.draw_sequence(&placements)))?;
         stdout.flush()?;
         self.images_visible = true;
         Ok(())
+    }
+
+    fn inline_image_placements(&self, slide: &Slide) -> Vec<ImagePlacement> {
+        if self.inline_image_slots.is_empty() {
+            return Vec::new();
+        }
+
+        let mut placements = Vec::new();
+        let col = 1u16;
+        let cols = 80u16;
+        for slot in &self.inline_image_slots {
+            if slot.start_line < self.text_scroll {
+                continue;
+            }
+            let Some(image) = slide.images.get(slot.image_index) else {
+                continue;
+            };
+            let row = 1u16.saturating_add((slot.start_line - self.text_scroll) as u16);
+            if let Some(mut placement) = build_placement_at(image, row, col, cols, slot.rows as u16) {
+                placement.image_id = (slot.image_index + 1) as u32;
+                placement.placement_id = (slot.image_index + 1) as u32;
+                placements.push(placement);
+            }
+        }
+        placements
     }
 
     fn poll_tmux_focus(&mut self, stdout: &mut CrosstermBackend<Stdout>) -> Result<()> {

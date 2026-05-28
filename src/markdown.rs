@@ -5,13 +5,30 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::{Style as SyntectStyle, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
-pub fn render_markdown(content: &str) -> Vec<Line<'static>> {
-    let table_lines = detect_pipe_tables(content);
+#[derive(Clone, Debug, Default)]
+pub struct ImageSlot {
+    pub image_index: usize,
+    pub start_line: usize,
+    pub rows: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RenderedMarkdown {
+    pub lines: Vec<Line<'static>>,
+    pub image_slots: Vec<ImageSlot>,
+}
+
+pub fn render_markdown(content: &str) -> RenderedMarkdown {
+    let preprocessed = preprocess_images(content);
+    let table_lines = detect_pipe_tables(&preprocessed.content);
     if !table_lines.is_empty() {
-        return table_lines;
+        return RenderedMarkdown {
+            lines: table_lines,
+            image_slots: preprocessed.image_slots,
+        };
     }
 
-    let parser = Parser::new_ext(content, Options::all());
+    let parser = Parser::new_ext(&preprocessed.content, Options::all());
     let mut lines = Vec::new();
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut list_depth = 0usize;
@@ -162,7 +179,74 @@ pub fn render_markdown(content: &str) -> Vec<Line<'static>> {
     if lines.is_empty() {
         lines.push(Line::from(String::new()));
     }
-    lines
+    postprocess_image_slots(lines, preprocessed.image_slots)
+}
+
+#[derive(Default)]
+struct PreprocessedMarkdown {
+    content: String,
+    image_slots: Vec<ImageSlot>,
+}
+
+fn preprocess_images(content: &str) -> PreprocessedMarkdown {
+    let image_line = regex::Regex::new(r"^\s*!\[[^\]]*\]\(([^)]+)\)\s*$").unwrap();
+    let mut out = String::new();
+    let mut image_index = 0usize;
+    let mut image_slots = Vec::new();
+
+    for line in content.lines() {
+        if image_line.is_match(line) {
+            let marker = format!("SS_IMAGE_SLOT_{}", image_index);
+            out.push_str(&marker);
+            out.push('\n');
+            image_slots.push(ImageSlot {
+                image_index,
+                start_line: 0,
+                rows: 10,
+            });
+            image_index += 1;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+
+    PreprocessedMarkdown { content: out, image_slots }
+}
+
+fn postprocess_image_slots(lines: Vec<Line<'static>>, mut image_slots: Vec<ImageSlot>) -> RenderedMarkdown {
+    let mut out = Vec::new();
+    let mut slot_cursor = 0usize;
+    let mut line_index = 0usize;
+
+    for line in lines {
+        let plain = line.spans.iter().map(|span| span.content.as_ref()).collect::<String>();
+        if let Some(index) = parse_image_slot_marker(&plain) {
+            if let Some(slot) = image_slots.get_mut(index) {
+                slot.start_line = line_index;
+                for _ in 0..slot.rows {
+                    out.push(Line::from(String::new()));
+                    line_index += 1;
+                }
+                slot_cursor = slot_cursor.max(index + 1);
+                continue;
+            }
+        }
+        out.push(line);
+        line_index += 1;
+    }
+
+    image_slots.truncate(slot_cursor.max(image_slots.len()));
+    RenderedMarkdown { lines: out, image_slots }
+}
+
+fn parse_image_slot_marker(line: &str) -> Option<usize> {
+    let trimmed = line.trim();
+    let prefix = "SS_IMAGE_SLOT_";
+    if !trimmed.starts_with(prefix) {
+        return None;
+    }
+    trimmed[prefix.len()..].parse::<usize>().ok()
 }
 
 fn detect_pipe_tables(content: &str) -> Vec<Line<'static>> {
@@ -341,13 +425,14 @@ mod tests {
     #[test]
     fn renders_headings_and_lists() {
         let lines = render_markdown("# Title\n\n- one\n- two\n");
-        assert!(!lines.is_empty());
+        assert!(!lines.lines.is_empty());
     }
 
     #[test]
     fn renders_tables() {
         let lines = render_markdown("| Name | Value |\n| --- | --- |\n| one | 1 |\n| two | 22 |\n");
         let joined = lines
+            .lines
             .iter()
             .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
             .collect::<Vec<_>>()
