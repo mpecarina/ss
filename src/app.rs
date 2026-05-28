@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::cursor::{Hide, Show};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{execute, ExecutableCommand};
 use ratatui::backend::CrosstermBackend;
@@ -27,12 +28,16 @@ pub fn run() -> Result<()> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    if backend.available() {
+        stdout.execute(crossterm::style::Print(backend.clear_sequence())).ok();
+        stdout.flush().ok();
+    }
+    execute!(stdout, EnterAlternateScreen, Hide)?;
     let backend_term = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend_term)?;
     let result = App::new(dir, slides, tmux, backend).run(&mut terminal);
     disable_raw_mode().ok();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
+    execute!(terminal.backend_mut(), Show, LeaveAlternateScreen).ok();
     result
 }
 
