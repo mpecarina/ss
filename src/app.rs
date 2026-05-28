@@ -19,7 +19,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::deck::{Deck, Slide, load_deck};
 use crate::graphics::{ImageBackend, ImageCompositor, detect_backend, placements_for_view};
-use crate::layout::{SlideLayout, Viewport, build_layout, viewport_lines};
+use crate::layout::{SearchMatch, SlideLayout, Viewport, build_layout, viewport_lines};
 use crate::tmux::{TmuxRuntime, VisibilityState};
 
 pub fn run() -> Result<()> {
@@ -52,6 +52,8 @@ struct App {
     search_focus: bool,
     outline_search_focus: bool,
     search: String,
+    search_matches: Vec<SearchMatch>,
+    search_match_index: usize,
     outline_query: String,
     text_scroll: usize,
     body_rows: usize,
@@ -85,6 +87,8 @@ impl App {
             search_focus: false,
             outline_search_focus: false,
             search: String::new(),
+            search_matches: Vec::new(),
+            search_match_index: 0,
             outline_query: String::new(),
             text_scroll: 0,
             body_rows: 0,
@@ -177,8 +181,10 @@ impl App {
         self.body_rows = vertical[1].height as usize;
         let scroll = self.text_scroll;
         let body_rows = self.body_rows;
+        let matches = self.search_matches.clone();
+        let selected_match = (!matches.is_empty()).then_some(self.search_match_index);
         let layout = self.layout_for_current(vertical[1].width);
-        let viewport = viewport_lines(layout, scroll, body_rows);
+        let viewport = viewport_lines(layout, scroll, body_rows, &matches, selected_match);
         frame.render_widget(
             Paragraph::new(viewport).wrap(Wrap { trim: false }),
             vertical[1],
@@ -191,8 +197,8 @@ impl App {
             Paragraph::new(vec![
                 Line::from("ss help"),
                 Line::from(""),
-                Line::from("Navigation: arrows, h j k l, g/G, r, q"),
-                Line::from("Search: / current slide filter"),
+                Line::from("Navigation: arrows, h j k l, g/G, ctrl-u, ctrl-d, r, q"),
+                Line::from("Search: / current slide, n/N next or previous hit"),
                 Line::from("Outline: o, / filter, enter open"),
                 Line::from("Graphics: explicit image ownership and tmux visibility gating"),
             ]),
@@ -325,6 +331,7 @@ impl App {
                     self.outline_search_focus = true;
                 } else {
                     self.search_focus = true;
+                    self.update_search_matches();
                 }
             }
             KeyCode::Char('r') => {
@@ -332,16 +339,25 @@ impl App {
                 self.deck = load_deck(&self.dir)?;
                 self.layout_cache.clear();
                 self.current = self.current.min(self.deck.slides.len().saturating_sub(1));
+                self.update_search_matches();
                 self.recompute_outline();
                 self.status = format!("reloaded {} slides", self.deck.slides.len());
             }
             KeyCode::Char('g') => {
                 self.current = 0;
                 self.text_scroll = 0;
+                self.update_search_matches();
             }
             KeyCode::Char('G') => {
                 self.current = self.deck.slides.len().saturating_sub(1);
                 self.text_scroll = 0;
+                self.update_search_matches();
+            }
+            KeyCode::Char('n') if !self.outline => {
+                self.advance_search_match(1);
+            }
+            KeyCode::Char('N') if !self.outline => {
+                self.advance_search_match(-1);
             }
             KeyCode::Enter
             | KeyCode::Right
@@ -354,10 +370,12 @@ impl App {
                         self.current = index;
                         self.outline = false;
                         self.text_scroll = 0;
+                        self.update_search_matches();
                     }
                 } else if self.current + 1 < self.deck.slides.len() {
                     self.current += 1;
                     self.text_scroll = 0;
+                    self.update_search_matches();
                 }
             }
             KeyCode::Left
@@ -373,6 +391,7 @@ impl App {
                 } else if self.current > 0 {
                     self.current -= 1;
                     self.text_scroll = 0;
+                    self.update_search_matches();
                 }
             }
             KeyCode::Char('d')
@@ -399,11 +418,11 @@ impl App {
             KeyCode::Esc | KeyCode::Enter => self.search_focus = false,
             KeyCode::Backspace => {
                 self.search.pop();
-                self.ensure_search_visible();
+                self.update_search_matches();
             }
             KeyCode::Char(ch) => {
                 self.search.push(ch);
-                self.ensure_search_visible();
+                self.update_search_matches();
             }
             _ => {}
         }
@@ -506,28 +525,68 @@ impl App {
         })
     }
 
-    fn ensure_search_visible(&mut self) {
-        if self.search.is_empty() || self.body_rows == 0 {
+    fn update_search_matches(&mut self) {
+        self.search_matches.clear();
+        self.search_match_index = 0;
+        self.status.clear();
+
+        if self.search.is_empty() {
             return;
         }
+
         let width = self.text_rect.map(|rect| rect.width).unwrap_or(80);
         let query = self.search.to_lowercase();
-        let searchable = self
-            .layout_for_current(width)
-            .searchable_text
-            .clone()
-            .to_lowercase();
-        if let Some(position) = searchable.find(&query) {
-            let row = searchable[..position]
-                .chars()
-                .filter(|ch| *ch == '\n')
-                .count();
-            if row < self.text_scroll {
-                self.text_scroll = row;
-            } else if row >= self.text_scroll + self.body_rows {
-                self.text_scroll = row.saturating_sub(self.body_rows.saturating_sub(1));
+        let lines = self.layout_for_current(width).lines.clone();
+        for line in &lines {
+            let haystack = line.search_text.to_lowercase();
+            let mut offset = 0usize;
+            while let Some(position) = haystack[offset..].find(&query) {
+                let start = offset + position;
+                self.search_matches.push(SearchMatch {
+                    row: line.row,
+                    start,
+                    len: query.chars().count(),
+                });
+                offset = start.saturating_add(1);
             }
         }
+
+        if self.search_matches.is_empty() {
+            self.status = format!("no matches for /{}", self.search);
+            return;
+        }
+
+        self.focus_search_match();
+    }
+
+    fn advance_search_match(&mut self, delta: isize) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+
+        let len = self.search_matches.len() as isize;
+        let current = self.search_match_index as isize;
+        self.search_match_index = (current + delta).rem_euclid(len) as usize;
+        self.focus_search_match();
+    }
+
+    fn focus_search_match(&mut self) {
+        if self.search_matches.is_empty() || self.body_rows == 0 {
+            return;
+        }
+
+        let row = self.search_matches[self.search_match_index].row;
+        if row < self.text_scroll {
+            self.text_scroll = row;
+        } else if row >= self.text_scroll + self.body_rows {
+            self.text_scroll = row.saturating_sub(self.body_rows.saturating_sub(1));
+        }
+        self.status = format!(
+            "match {}/{} for /{}",
+            self.search_match_index + 1,
+            self.search_matches.len(),
+            self.search
+        );
     }
 
     fn scroll_text(&mut self, delta: isize) {
@@ -653,7 +712,41 @@ mod tests {
         app.body_rows = 1;
         app.text_rect = Some(Rect::new(0, 0, 20, 1));
         app.search = "world".to_string();
-        app.ensure_search_visible();
+        app.update_search_matches();
         assert_eq!(app.text_scroll, 0);
+    }
+
+    #[test]
+    fn search_navigation_cycles_matches() {
+        let mut deck = sample_deck();
+        deck.slides[0].blocks = vec![Block::Paragraph(ParagraphBlock {
+            id: 0,
+            content: vec![crate::deck::model::Inline::Text(
+                "world hello world hello world".to_string(),
+            )],
+        })];
+        let mut app = App::new(
+            PathBuf::from("."),
+            deck,
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+        );
+        app.body_rows = 1;
+        app.text_rect = Some(Rect::new(0, 0, 12, 1));
+        app.search = "world".to_string();
+        app.update_search_matches();
+
+        assert_eq!(app.search_matches.len(), 3);
+        assert_eq!(app.search_match_index, 0);
+
+        app.advance_search_match(1);
+        assert_eq!(app.search_match_index, 1);
+
+        app.advance_search_match(1);
+        app.advance_search_match(1);
+        assert_eq!(app.search_match_index, 0);
+
+        app.advance_search_match(-1);
+        assert_eq!(app.search_match_index, 2);
     }
 }

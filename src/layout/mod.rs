@@ -21,6 +21,15 @@ pub struct SlideLayout {
 pub struct LayoutLine {
     pub row: usize,
     pub spans: Vec<Span<'static>>,
+    pub search_text: String,
+    pub text_span_index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub row: usize,
+    pub start: usize,
+    pub len: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -110,7 +119,12 @@ pub fn build_layout(slide: &Slide, viewport: Viewport) -> SlideLayout {
                         code_line.to_string(),
                         Style::default().fg(Color::White).bg(Color::DarkGray),
                     )];
-                    lines.push(LayoutLine { row, spans });
+                    lines.push(LayoutLine {
+                        row,
+                        spans,
+                        search_text: code_line.to_string(),
+                        text_span_index: 0,
+                    });
                     searchable_text.push_str(code_line);
                     searchable_text.push('\n');
                     row += 1;
@@ -127,6 +141,8 @@ pub fn build_layout(slide: &Slide, viewport: Viewport) -> SlideLayout {
                     lines.push(LayoutLine {
                         row,
                         spans: vec![Span::styled(text.clone(), Style::default())],
+                        search_text: text.clone(),
+                        text_span_index: 0,
                     });
                     searchable_text.push_str(&text);
                     searchable_text.push('\n');
@@ -141,6 +157,8 @@ pub fn build_layout(slide: &Slide, viewport: Viewport) -> SlideLayout {
                         "─".repeat(wrap_width.min(80)),
                         Style::default().fg(Color::DarkGray),
                     )],
+                    search_text: String::new(),
+                    text_span_index: 0,
                 });
                 searchable_text.push('\n');
                 row += 1;
@@ -170,17 +188,88 @@ pub fn build_layout(slide: &Slide, viewport: Viewport) -> SlideLayout {
     }
 }
 
-pub fn viewport_lines(layout: &SlideLayout, scroll: usize, height: usize) -> Vec<Line<'static>> {
+pub fn viewport_lines(
+    layout: &SlideLayout,
+    scroll: usize,
+    height: usize,
+    matches: &[SearchMatch],
+    selected_match: Option<usize>,
+) -> Vec<Line<'static>> {
     let end = scroll.saturating_add(height);
     let mut out = Vec::new();
     for row in scroll..end {
         if let Some(line) = layout.lines.iter().find(|line| line.row == row) {
-            out.push(Line::from(line.spans.clone()));
+            let row_matches = matches
+                .iter()
+                .enumerate()
+                .filter(|(_, hit)| hit.row == row)
+                .collect::<Vec<_>>();
+            if row_matches.is_empty() || line.search_text.is_empty() {
+                out.push(Line::from(line.spans.clone()));
+                continue;
+            }
+
+            let mut spans = Vec::new();
+            for (index, span) in line.spans.iter().enumerate() {
+                if index == line.text_span_index {
+                    spans.extend(highlight_search_matches(
+                        span.content.as_ref(),
+                        span.style,
+                        &row_matches,
+                        selected_match,
+                    ));
+                } else {
+                    spans.push(span.clone());
+                }
+            }
+            out.push(Line::from(spans));
         } else {
             out.push(Line::from(String::new()));
         }
     }
     out
+}
+
+fn highlight_search_matches(
+    text: &str,
+    base_style: Style,
+    matches: &[(usize, &SearchMatch)],
+    selected_match: Option<usize>,
+) -> Vec<Span<'static>> {
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut spans = Vec::new();
+    let mut cursor = 0usize;
+
+    for (match_index, hit) in matches {
+        let start = hit.start.min(chars.len());
+        let end = hit.start.saturating_add(hit.len).min(chars.len());
+        if cursor < start {
+            spans.push(Span::styled(
+                chars[cursor..start].iter().collect::<String>(),
+                base_style,
+            ));
+        }
+
+        let style = if Some(*match_index) == selected_match {
+            base_style.fg(Color::Black).bg(Color::Yellow)
+        } else {
+            base_style.bg(Color::DarkGray)
+        };
+        spans.push(Span::styled(
+            chars[start..end].iter().collect::<String>(),
+            style,
+        ));
+        cursor = end;
+    }
+
+    if cursor < chars.len() {
+        spans.push(Span::styled(
+            chars[cursor..].iter().collect::<String>(),
+            base_style,
+        ));
+    }
+
+    spans
 }
 
 fn push_wrapped_inline_lines(
@@ -206,7 +295,12 @@ fn push_wrapped_inline_lines(
             segment.clone(),
             style_inline(inlines, base_style),
         ));
-        lines.push(LayoutLine { row: *row, spans });
+        lines.push(LayoutLine {
+            row: *row,
+            spans,
+            search_text: segment.clone(),
+            text_span_index: if prefix_text.is_empty() { 0 } else { 1 },
+        });
         searchable_text.push_str(&segment);
         searchable_text.push('\n');
         *row += 1;
@@ -296,6 +390,8 @@ fn push_blank(row: &mut usize, lines: &mut Vec<LayoutLine>, searchable_text: &mu
     lines.push(LayoutLine {
         row: *row,
         spans: vec![Span::raw(String::new())],
+        search_text: String::new(),
+        text_span_index: 0,
     });
     searchable_text.push('\n');
     *row += 1;

@@ -16,7 +16,7 @@ build:
 	@cp target/release/ss $(LOCAL_BIN)/ss
 
 run:
-	@cargo run --release -- $(ARGS)
+	@cargo run --quiet --release -- $(ARGS)
 
 clean:
 	@rm -rf $(LOCAL_BIN) target
