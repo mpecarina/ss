@@ -20,15 +20,18 @@ Run directly:
 make run ARGS=./examples
 ```
 
-## Tmux Plugin Style Usage
+## Tmux Plugin Usage
 
-Source the wrapper from your `~/.tmux.conf`:
+Recommended: install through TPM so `prefix + U` updates the repo and the next
+launch rebuilds the binary automatically when the git commit changed.
+
+Add to your `~/.tmux.conf`:
 
 ```tmux
 set -g allow-passthrough on
-run-shell '/absolute/path/to/ss/ss.tmux'
+set -g @plugin 'mpecarina/ss'
 
-set -g @ss_bin '/absolute/path/to/ss/bin/ss'
+# optional
 set -g @ss_launch_mode 'popup'
 set -g @ss_key 'S'
 ```
@@ -37,6 +40,19 @@ Defaults:
 
 - launch mode: `popup`
 - key: `S`
+
+Optional binary override:
+
+```tmux
+set -g @ss_bin '~/.tmux/plugins/ss/bin/ss'
+```
+
+Then install/update plugins with TPM:
+
+```text
+prefix + I    install
+prefix + U    update
+```
 
 The wrapper auto-builds when the binary is missing or the git commit changed,
 following the same thin tmux-wrapper model used in `rustasshn`.

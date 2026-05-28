@@ -58,7 +58,9 @@ struct App {
     image_backend: Box<dyn ImageBackend>,
     images_visible: bool,
     image_rect: Option<Rect>,
+    text_rect: Option<Rect>,
     inline_image_slots: Vec<ImageSlot>,
+    image_debug: String,
     last_focus_poll: Instant,
     pending_g: bool,
 }
@@ -87,7 +89,9 @@ impl App {
             image_backend,
             images_visible: false,
             image_rect: None,
+            text_rect: None,
             inline_image_slots: Vec::new(),
+            image_debug: String::new(),
             last_focus_poll: Instant::now(),
             pending_g: false,
         };
@@ -295,11 +299,13 @@ impl App {
     fn draw(&mut self, frame: &mut ratatui::Frame) {
         if self.help {
             self.image_rect = None;
+            self.text_rect = None;
             self.draw_help(frame);
             return;
         }
         if self.outline {
             self.image_rect = None;
+            self.text_rect = None;
             self.draw_outline(frame);
             return;
         }
@@ -326,6 +332,7 @@ impl App {
             .split(vertical[1]);
 
         self.image_rect = None;
+        self.text_rect = Some(body_chunks[0]);
 
         self.body_rows = body_chunks[0].height as usize;
 
@@ -424,6 +431,8 @@ impl App {
             Span::styled(search_status, Style::default().fg(Color::Yellow)),
             Span::raw("  "),
             Span::styled(self.scroll_status(), Style::default().fg(Color::Magenta)),
+            Span::raw("  "),
+            Span::styled(self.image_debug.clone(), Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
             Span::styled(self.status.clone(), Style::default().fg(Color::DarkGray)),
         ]);
@@ -612,12 +621,35 @@ impl App {
 
     fn draw_images(&mut self, stdout: &mut CrosstermBackend<Stdout>) -> Result<()> {
         if !self.image_backend.available() || !self.tmux_visible() {
+            self.image_debug = format!(
+                "slots:{} backend:{} visible:{}",
+                self.inline_image_slots.len(),
+                self.image_backend.name(),
+                self.tmux_visible()
+            );
             return Ok(());
         }
         let slide = &self.slides[self.current];
         let placements = self.inline_image_placements(slide);
         if placements.is_empty() {
+            self.image_debug = format!(
+                "slots:{} placements:0 first:{}",
+                self.inline_image_slots.len(),
+                slide.images.first().map(|image| image.path.as_str()).unwrap_or("none")
+            );
             return Ok(());
+        }
+
+        if let Some(first) = placements.first() {
+            self.image_debug = format!(
+                "slots:{} placements:{} r{} c{} {}x{}",
+                self.inline_image_slots.len(),
+                placements.len(),
+                first.row,
+                first.col,
+                first.cols,
+                first.rows
+            );
         }
 
         stdout.execute(crossterm::style::Print(self.image_backend.draw_sequence(&placements)))?;
@@ -631,9 +663,13 @@ impl App {
             return Vec::new();
         }
 
+        let Some(text_rect) = self.text_rect else {
+            return Vec::new();
+        };
+
         let mut placements = Vec::new();
-        let col = 1u16;
-        let cols = 80u16;
+        let col = text_rect.x.saturating_add(1);
+        let cols = text_rect.width.saturating_sub(1).max(10);
         for slot in &self.inline_image_slots {
             if slot.start_line < self.text_scroll {
                 continue;
@@ -641,7 +677,8 @@ impl App {
             let Some(image) = slide.images.get(slot.image_index) else {
                 continue;
             };
-            let row = 1u16.saturating_add((slot.start_line - self.text_scroll) as u16);
+            let local_line = (slot.start_line - self.text_scroll) as u16;
+            let row = text_rect.y.saturating_add(local_line).saturating_add(1);
             if let Some(mut placement) = build_placement_at(image, row, col, cols, slot.rows as u16) {
                 placement.image_id = (slot.image_index + 1) as u32;
                 placement.placement_id = (slot.image_index + 1) as u32;
