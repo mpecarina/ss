@@ -105,10 +105,16 @@ impl App {
     }
 
     fn run(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+        let mut dirty = true;
         loop {
-            self.poll_tmux_focus(terminal.backend_mut())?;
-            terminal.draw(|frame| self.draw(frame))?;
-            self.draw_images(terminal.backend_mut())?;
+            if self.poll_tmux_focus(terminal.backend_mut())? {
+                dirty = true;
+            }
+            if dirty {
+                terminal.draw(|frame| self.draw(frame))?;
+                self.draw_images(terminal.backend_mut())?;
+                dirty = false;
+            }
             if event::poll(Duration::from_millis(80))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind != KeyEventKind::Press {
@@ -117,6 +123,7 @@ impl App {
                     if self.handle_key(key, terminal.backend_mut())? {
                         break;
                     }
+                    dirty = true;
                 }
             }
         }
@@ -716,16 +723,17 @@ impl App {
         placements
     }
 
-    fn poll_tmux_focus(&mut self, stdout: &mut CrosstermBackend<Stdout>) -> Result<()> {
+    fn poll_tmux_focus(&mut self, stdout: &mut CrosstermBackend<Stdout>) -> Result<bool> {
         if self.last_focus_poll.elapsed() < Duration::from_millis(200) {
-            return Ok(());
+            return Ok(false);
         }
         self.last_focus_poll = Instant::now();
         if self.images_visible && !self.tmux_visible() {
             self.delete_last_images(stdout)?;
             self.status = "images hidden while pane inactive".to_string();
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     fn tmux_visible(&self) -> bool {
