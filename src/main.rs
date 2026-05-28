@@ -1,7 +1,8 @@
 mod app;
-mod images;
+mod deck;
+mod graphics;
+mod layout;
 mod markdown;
-mod slides;
 mod tmux;
 
 fn main() -> anyhow::Result<()> {

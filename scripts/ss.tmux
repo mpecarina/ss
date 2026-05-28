@@ -6,6 +6,12 @@ REPO_ROOT="$(cd "${CURRENT_DIR}/.." && pwd)"
 
 BIN_PATH="$(tmux show -gqv @ss_bin || true)"
 LAUNCH_MODE="$(tmux show -gqv @ss_launch_mode || true)"
+PROBE_MODE="$(tmux show -gqv @ss_probe || true)"
+TMUX_SOCKET="${TMUX%%,*}"
+PANE_ID="$(tmux display-message -p '#{pane_id}' || true)"
+WINDOW_ID="$(tmux display-message -p '#{window_id}' || true)"
+SESSION_ID="$(tmux display-message -p '#{session_id}' || true)"
+RUNTIME_ID="ss-$(date +%s)-$$"
 
 if [[ -z "${BIN_PATH}" ]]; then
   BIN_PATH="${REPO_ROOT}/bin/ss"
@@ -45,6 +51,13 @@ PANE_PATH="$(tmux display-message -p '#{pane_current_path}' || true)"
 
 CMD=(
   env
+  "SS_IMAGE_PROBE=${PROBE_MODE}"
+  "SS_TMUX_SOCKET=${TMUX_SOCKET}"
+  "SS_TMUX_PANE_ID=${PANE_ID}"
+  "SS_TMUX_WINDOW_ID=${WINDOW_ID}"
+  "SS_TMUX_SESSION_ID=${SESSION_ID}"
+  "SS_LAUNCH_MODE=${LAUNCH_MODE}"
+  "SS_RUNTIME_ID=${RUNTIME_ID}"
   "${BIN_PATH}"
   "${PANE_PATH}"
 )
