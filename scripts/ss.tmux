@@ -41,16 +41,10 @@ if [[ "${NEEDS_BUILD}" -eq 1 ]]; then
   fi
 fi
 
-PANE_ID="$(tmux display-message -p '#{pane_id}' || true)"
-WINDOW_ID="$(tmux display-message -p '#{window_id}' || true)"
-SESSION_ID="$(tmux display-message -p '#{session_id}' || true)"
 PANE_PATH="$(tmux display-message -p '#{pane_current_path}' || true)"
 
 CMD=(
   env
-  "SS_TMUX_PANE_ID=${PANE_ID}"
-  "SS_TMUX_WINDOW_ID=${WINDOW_ID}"
-  "SS_TMUX_SESSION_ID=${SESSION_ID}"
   "${BIN_PATH}"
   "${PANE_PATH}"
 )

@@ -45,13 +45,14 @@ pub fn load_slides(dir: &Path) -> Result<Vec<Slide>> {
 
     let mut slides = Vec::with_capacity(paths.len());
     for path in paths {
-        let raw = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let absolute_path = fs::canonicalize(&path).unwrap_or(path.clone());
+        let raw = fs::read_to_string(&absolute_path).with_context(|| format!("read {}", absolute_path.display()))?;
         let (content, _layout) = parse_frontmatter(&raw);
-        let title = first_heading(&content).unwrap_or_else(|| fallback_title(&path));
-        let images = extract_images(&content, path.parent().unwrap_or(dir));
+        let title = first_heading(&content).unwrap_or_else(|| fallback_title(&absolute_path));
+        let images = extract_images(&content, absolute_path.parent().unwrap_or(dir));
         slides.push(Slide {
-            path: path.clone(),
-            name: path.file_name().unwrap_or_default().to_string_lossy().to_string(),
+            path: absolute_path.clone(),
+            name: absolute_path.file_name().unwrap_or_default().to_string_lossy().to_string(),
             title,
             content,
             images,

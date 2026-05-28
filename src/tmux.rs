@@ -10,10 +10,11 @@ pub struct TmuxContext {
 
 impl TmuxContext {
     pub fn detect() -> Self {
-        Self {
-            socket: socket_path(),
-            pane_id: std::env::var("SS_TMUX_PANE_ID").unwrap_or_default(),
-        }
+        let socket = socket_path();
+        let pane_id = current_pane_id(&socket)
+            .or_else(|| std::env::var("SS_TMUX_PANE_ID").ok())
+            .unwrap_or_default();
+        Self { socket, pane_id }
     }
 
     pub fn in_tmux(&self) -> bool {
@@ -78,5 +79,23 @@ fn socket_path() -> String {
     match trimmed.find(',') {
         Some(index) => trimmed[..index].to_string(),
         None => trimmed.to_string(),
+    }
+}
+
+fn current_pane_id(socket: &str) -> Option<String> {
+    let mut cmd = Command::new("tmux");
+    if !socket.is_empty() {
+        cmd.arg("-S").arg(socket);
+    }
+    cmd.args(["display-message", "-p", "#{pane_id}"]);
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let pane = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if pane.is_empty() {
+        None
+    } else {
+        Some(pane)
     }
 }

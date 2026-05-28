@@ -21,6 +21,7 @@ pub trait ImageBackend {
     fn available(&self) -> bool;
     fn name(&self) -> &'static str;
     fn clear_sequence(&self) -> String;
+    fn delete_sequence(&self, ids: &[u32]) -> String;
     fn draw_sequence(&self, placements: &[ImagePlacement]) -> String;
 }
 
@@ -37,6 +38,10 @@ impl ImageBackend for NoopBackend {
     }
 
     fn clear_sequence(&self) -> String {
+        String::new()
+    }
+
+    fn delete_sequence(&self, _ids: &[u32]) -> String {
         String::new()
     }
 
@@ -67,6 +72,17 @@ impl ImageBackend for KittyBackend {
 
     fn clear_sequence(&self) -> String {
         wrap_for_tmux("\x1b_Ga=d,d=A\x1b\\", &self.tmux)
+    }
+
+    fn delete_sequence(&self, ids: &[u32]) -> String {
+        if ids.is_empty() {
+            return String::new();
+        }
+        let mut out = String::new();
+        for id in ids {
+            let _ = write!(out, "\x1b_Ga=d,d=i,i={}\x1b\\", id);
+        }
+        wrap_for_tmux(&out, &self.tmux)
     }
 
     fn draw_sequence(&self, placements: &[ImagePlacement]) -> String {

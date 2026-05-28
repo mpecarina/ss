@@ -61,6 +61,8 @@ struct App {
     text_rect: Option<Rect>,
     inline_image_slots: Vec<ImageSlot>,
     image_debug: String,
+    last_image_signature: String,
+    last_image_ids: Vec<u32>,
     last_focus_poll: Instant,
     pending_g: bool,
 }
@@ -92,6 +94,8 @@ impl App {
             text_rect: None,
             inline_image_slots: Vec::new(),
             image_debug: String::new(),
+            last_image_signature: String::new(),
+            last_image_ids: Vec::new(),
             last_focus_poll: Instant::now(),
             pending_g: false,
         };
@@ -182,7 +186,7 @@ impl App {
                 }
             }
             KeyCode::Char('r') => {
-                self.clear_images(stdout)?;
+                self.delete_last_images(stdout)?;
                 self.reload_slides()?;
             }
             KeyCode::Char('g') => {
@@ -195,7 +199,7 @@ impl App {
                         self.pending_g = true;
                     }
                 } else if self.pending_g {
-                    self.clear_images(stdout)?;
+                    self.delete_last_images(stdout)?;
                     self.current = 0;
                     self.pending_g = false;
                     self.text_scroll = 0;
@@ -211,7 +215,7 @@ impl App {
                         self.outline_index = self.outline_filtered.len() - 1;
                     }
                 } else {
-                    self.clear_images(stdout)?;
+                    self.delete_last_images(stdout)?;
                     self.current = self.slides.len().saturating_sub(1);
                     self.text_scroll = 0;
                     self.refresh_matches();
@@ -221,14 +225,14 @@ impl App {
                 self.pending_g = false;
                 if self.outline {
                     if !self.outline_filtered.is_empty() {
-                        self.clear_images(stdout)?;
+                        self.delete_last_images(stdout)?;
                         self.current = self.outline_filtered[self.outline_index.min(self.outline_filtered.len() - 1)];
                         self.outline = false;
                         self.text_scroll = 0;
                         self.refresh_matches();
                     }
                 } else if self.current + 1 < self.slides.len() {
-                    self.clear_images(stdout)?;
+                    self.delete_last_images(stdout)?;
                     self.current += 1;
                     self.text_scroll = 0;
                     self.refresh_matches();
@@ -242,7 +246,7 @@ impl App {
                         self.ensure_outline_visible();
                     }
                 } else if self.current > 0 {
-                    self.clear_images(stdout)?;
+                    self.delete_last_images(stdout)?;
                     self.current -= 1;
                     self.text_scroll = 0;
                     self.refresh_matches();
@@ -621,6 +625,9 @@ impl App {
 
     fn draw_images(&mut self, stdout: &mut CrosstermBackend<Stdout>) -> Result<()> {
         if !self.image_backend.available() || !self.tmux_visible() {
+            if self.images_visible {
+                self.delete_last_images(stdout)?;
+            }
             self.image_debug = format!(
                 "slots:{} backend:{} visible:{}",
                 self.inline_image_slots.len(),
@@ -629,13 +636,23 @@ impl App {
             );
             return Ok(());
         }
-        let slide = &self.slides[self.current];
-        let placements = self.inline_image_placements(slide);
+        let first_image = self.slides[self.current]
+            .images
+            .first()
+            .map(|image| image.path.clone())
+            .unwrap_or_else(|| "none".to_string());
+        let placements = {
+            let slide = &self.slides[self.current];
+            self.inline_image_placements(slide)
+        };
         if placements.is_empty() {
+            if self.images_visible {
+                self.delete_last_images(stdout)?;
+            }
             self.image_debug = format!(
                 "slots:{} placements:0 first:{}",
                 self.inline_image_slots.len(),
-                slide.images.first().map(|image| image.path.as_str()).unwrap_or("none")
+                first_image
             );
             return Ok(());
         }
@@ -652,9 +669,20 @@ impl App {
             );
         }
 
+        let signature = image_signature(&placements);
+        if self.images_visible && self.last_image_signature == signature {
+            return Ok(());
+        }
+
+        if self.images_visible {
+            self.delete_last_images(stdout)?;
+        }
+
         stdout.execute(crossterm::style::Print(self.image_backend.draw_sequence(&placements)))?;
         stdout.flush()?;
         self.images_visible = true;
+        self.last_image_signature = signature;
+        self.last_image_ids = placements.iter().map(|placement| placement.image_id).collect();
         Ok(())
     }
 
@@ -694,7 +722,7 @@ impl App {
         }
         self.last_focus_poll = Instant::now();
         if self.images_visible && !self.tmux_visible() {
-            self.clear_images(stdout)?;
+            self.delete_last_images(stdout)?;
             self.status = "images hidden while pane inactive".to_string();
         }
         Ok(())
@@ -710,8 +738,40 @@ impl App {
             stdout.flush()?;
             self.images_visible = false;
         }
+        self.last_image_signature.clear();
+        self.last_image_ids.clear();
         Ok(())
     }
+
+    fn delete_last_images(&mut self, stdout: &mut CrosstermBackend<Stdout>) -> Result<()> {
+        if !self.last_image_ids.is_empty() {
+            stdout.execute(crossterm::style::Print(self.image_backend.delete_sequence(&self.last_image_ids)))?;
+            stdout.flush()?;
+        } else if self.images_visible {
+            stdout.execute(crossterm::style::Print(self.image_backend.clear_sequence()))?;
+            stdout.flush()?;
+        }
+        self.images_visible = false;
+        self.last_image_signature.clear();
+        self.last_image_ids.clear();
+        Ok(())
+    }
+}
+
+fn image_signature(placements: &[ImagePlacement]) -> String {
+    let mut out = String::new();
+    for placement in placements {
+        out.push_str(&format!(
+            "{}:{}:{}:{}:{}:{}|",
+            placement.path,
+            placement.row,
+            placement.col,
+            placement.cols,
+            placement.rows,
+            placement.image_id
+        ));
+    }
+    out
 }
 
 fn highlight_line_spans(
