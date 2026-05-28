@@ -38,8 +38,8 @@ impl TmuxContext {
             "#{?pane_active,1,0}|#{window_active}|#{session_attached}",
         ])?;
         let mut parts = output.trim().split('|');
+        let _pane_active = parts.next().unwrap_or("0") == "1";
         Ok(TmuxActive {
-            pane_active: parts.next().unwrap_or("0") == "1",
             window_active: parts.next().unwrap_or("0") == "1",
             session_attached: parts.next().unwrap_or("0") != "0",
         })
@@ -59,14 +59,15 @@ impl TmuxContext {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TmuxActive {
-    pub pane_active: bool,
     pub window_active: bool,
     pub session_attached: bool,
 }
 
 impl TmuxActive {
     pub fn visible(self) -> bool {
-        self.pane_active && self.window_active && self.session_attached
+        // Popup panes can report pane_active inconsistently even while visible.
+        // Window/session visibility is the more stable signal for cleanup.
+        self.window_active && self.session_attached
     }
 }
 
