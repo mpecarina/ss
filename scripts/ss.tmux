@@ -20,8 +20,10 @@ if [[ "${BIN_PATH}" == "~/"* ]]; then
   BIN_PATH="${HOME}/${BIN_PATH:2}"
 fi
 if [[ -z "${LAUNCH_MODE}" ]]; then
-  LAUNCH_MODE="popup"
+  LAUNCH_MODE="pane"
 fi
+
+SHELL_BIN="${SHELL:-sh}"
 
 STAMP_FILE="${BIN_PATH}.commit"
 CURRENT_COMMIT="$(cd "${REPO_ROOT}" && git rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -64,6 +66,13 @@ CMD=(
 
 if [[ "${LAUNCH_MODE}" == "popup" ]]; then
   tmux display-popup -E -w 90% -h 85% -- "${CMD[@]}"
+  exit 0
+fi
+
+if [[ "${LAUNCH_MODE}" == "pane" ]]; then
+  CMD_STR=""
+  printf -v CMD_STR '%q ' "${CMD[@]}"
+  tmux respawn-pane -k -c "${PANE_PATH}" -- "${SHELL_BIN}" -lc "${CMD_STR}; exec \"${SHELL_BIN}\" -l"
   exit 0
 fi
 

@@ -32,14 +32,20 @@ set -g allow-passthrough on
 set -g @plugin 'mpecarina/ss'
 
 # optional
-set -g @ss_launch_mode 'popup'
+set -g @ss_launch_mode 'pane'
 set -g @ss_key 'S'
 ```
 
 Defaults:
 
-- launch mode: `popup`
+- launch mode: `pane`
 - key: `S`
+
+Launch modes:
+
+- `popup`: open the viewer in a tmux popup
+- `pane`: reuse the current pane by respawning it with `ss`
+- `window`: open the viewer in a new tmux window
 
 Optional binary override:
 
@@ -59,12 +65,12 @@ following the same thin tmux-wrapper model used in `rustasshn`.
 
 ## Why Rust
 
-This repo now treats the Rust tmux popup app as the primary runtime path.
+This repo now treats the Rust tmux app as the primary runtime path.
 
 The old Go implementation is no longer the main build/run surface because the
 important requirement is tmux-aware image lifecycle management:
 
-- popup-first launch
+- pane-first launch
 - pane/window focus awareness
 - clearing kitty graphics when the viewer is not the active tmux pane/window
 

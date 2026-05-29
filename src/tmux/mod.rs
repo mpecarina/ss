@@ -19,6 +19,7 @@ pub struct TmuxRuntime {
 pub enum LaunchMode {
     #[default]
     Popup,
+    Pane,
     Window,
 }
 
@@ -50,6 +51,7 @@ impl TmuxRuntime {
             .or_else(|| std::env::var("SS_TMUX_SESSION_ID").ok())
             .unwrap_or_default();
         let launch_mode = match std::env::var("SS_LAUNCH_MODE").unwrap_or_default().as_str() {
+            "pane" => LaunchMode::Pane,
             "window" => LaunchMode::Window,
             _ => LaunchMode::Popup,
         };
