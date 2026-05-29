@@ -19,7 +19,7 @@ use ratatui::layout::Alignment;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::deck::{Deck, Slide, load_deck};
 use crate::graphics::{ImageBackend, ImageCompositor, detect_backend, placements_for_view};
@@ -93,12 +93,6 @@ struct App {
     last_visibility_poll: Instant,
     escape_sequence: EscapeSequence,
     csi_buffer: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum VisualMode {
-    Present,
-    Reader,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -180,66 +174,13 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut ratatui::Frame) {
-        if self.help {
-            self.text_rect = None;
-            self.draw_help(frame);
-            return;
-        }
+        self.draw_present(frame);
         if self.outline {
-            self.text_rect = None;
             self.draw_outline(frame);
-            return;
         }
-
-        match self.visual_mode() {
-            VisualMode::Present => self.draw_present(frame),
-            VisualMode::Reader => self.draw_reader(frame),
+        if self.help {
+            self.draw_help(frame);
         }
-    }
-
-    fn draw_reader(&mut self, frame: &mut ratatui::Frame) {
-        let size = frame.area();
-        let vertical = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Min(1),
-                Constraint::Length(2),
-            ])
-            .split(size);
-        let slide = self.current_slide();
-        let slide_title = slide.title.clone();
-        let slide_name = slide.name.clone();
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(
-                    " ss ",
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" "),
-                Span::styled(slide_title, Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw("  "),
-                Span::styled(slide_name, Style::default().fg(Color::DarkGray)),
-            ])),
-            vertical[0],
-        );
-
-        self.text_rect = Some(vertical[1]);
-        self.body_rows = vertical[1].height as usize;
-        let scroll = self.text_scroll;
-        let body_rows = self.body_rows;
-        let matches = self.search_matches.clone();
-        let selected_match = (!matches.is_empty()).then_some(self.search_match_index);
-        let layout = self.layout_for_current(vertical[1].width);
-        let viewport = viewport_lines(layout, scroll, body_rows, &matches, selected_match);
-        frame.render_widget(
-            Paragraph::new(viewport).wrap(Wrap { trim: false }),
-            vertical[1],
-        );
-        frame.render_widget(self.footer(), vertical[2]);
     }
 
     fn draw_present(&mut self, frame: &mut ratatui::Frame) {
@@ -289,7 +230,13 @@ impl App {
         if !scroll_status.is_empty() {
             bottom.push_str(&scroll_status);
         }
-        if !self.status.is_empty() {
+        let mode_status = self.operational_status();
+        if !mode_status.is_empty() {
+            if !bottom.is_empty() {
+                bottom.push_str("  ");
+            }
+            bottom.push_str(&mode_status);
+        } else if !self.status.is_empty() {
             if !bottom.is_empty() {
                 bottom.push_str("  ");
             }
@@ -304,6 +251,15 @@ impl App {
     }
 
     fn draw_help(&self, frame: &mut ratatui::Frame) {
+        let area = centered_rect(
+            frame.area(),
+            frame.area().width.min(84),
+            frame.area().height.min(10),
+        );
+        let block = Block::default().borders(Borders::ALL).title(" help ");
+        let inner = block.inner(area);
+        frame.render_widget(Clear, area);
+        frame.render_widget(block, area);
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from("ss help"),
@@ -311,15 +267,24 @@ impl App {
                 Line::from("Navigation: arrows, h j k l, g/G, ctrl-u, ctrl-d, r, q"),
                 Line::from("Search: / current slide, n/N next or previous hit"),
                 Line::from("Outline: o, / filter, enter open"),
-                Line::from("Visuals: presentation mode by default, reader mode while searching"),
+                Line::from("Visuals: presentation mode stays active during search and overlays"),
                 Line::from("Graphics: explicit image ownership and tmux visibility gating"),
             ]),
-            frame.area(),
+            inner,
         );
     }
 
     fn draw_outline(&mut self, frame: &mut ratatui::Frame) {
-        let size = frame.area();
+        let popup = centered_rect(
+            frame.area(),
+            frame.area().width.saturating_sub(12).min(88),
+            frame.area().height.saturating_sub(6).min(24),
+        );
+        let block = Block::default().borders(Borders::ALL).title(" outline ");
+        let inner = block.inner(popup);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(block, popup);
+        let size = inner;
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -385,65 +350,13 @@ impl App {
         );
     }
 
-    fn footer(&self) -> Paragraph<'static> {
-        let slide = self.current_slide();
-        let mode_status = if self.search_focus {
+    fn operational_status(&self) -> String {
+        if self.search_focus {
             format!("/{}", self.search)
         } else if self.outline_search_focus {
             format!("/{}", self.outline_query)
         } else {
-            self.status.clone()
-        };
-        let status_is_distinct = !self.status.is_empty() && self.status != mode_status;
-        let mut spans = vec![Span::styled(
-            format!(" {}/{} ", self.current + 1, self.deck.slides.len()),
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )];
-        let scroll_status = self.scroll_status();
-        if !scroll_status.is_empty() {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                scroll_status,
-                Style::default().fg(Color::Magenta),
-            ));
-        }
-        if !mode_status.is_empty() {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                mode_status,
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-        if status_is_distinct {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                self.status.clone(),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-        if !slide.assets.is_empty() {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                format!("visuals:{}", slide.assets.len()),
-                Style::default().fg(Color::Blue),
-            ));
-        }
-        Paragraph::new(Line::from(spans))
-    }
-
-    fn visual_mode(&self) -> VisualMode {
-        if self.help
-            || self.outline
-            || self.search_focus
-            || self.outline_search_focus
-            || !self.search.is_empty()
-        {
-            VisualMode::Reader
-        } else {
-            VisualMode::Present
+            String::new()
         }
     }
 
