@@ -464,10 +464,12 @@ impl App {
                     self.help = false;
                 } else if self.outline {
                     self.outline = false;
-                } else if self.visual_active() {
-                    self.clear_visual_mode();
                 } else if !self.search.is_empty() {
                     self.clear_search();
+                } else if self.visual_active() {
+                    self.clear_visual_mode();
+                } else {
+                    return Ok(true);
                 }
             }
             KeyCode::Char('o') => {
