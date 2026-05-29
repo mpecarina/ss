@@ -194,7 +194,21 @@ pub fn viewport_lines(
             let in_selection = selection
                 .map(|(start, finish)| row >= start && row <= finish && has_visible_text)
                 .unwrap_or(false);
-            let base_spans = line.spans.clone();
+            let base_spans = line
+                .spans
+                .iter()
+                .cloned()
+                .map(|span| {
+                    let span_style = span.style;
+                    if in_selection {
+                        span.style(span_style.bg(Color::Rgb(44, 47, 56)))
+                    } else if is_active_row && has_visible_text {
+                        span.style(span_style.bg(Color::Rgb(34, 37, 44)))
+                    } else {
+                        span
+                    }
+                })
+                .collect::<Vec<_>>();
             let mut prefixed_spans = vec![Span::styled(
                 if is_active_row && in_selection {
                     "▌ "
@@ -846,7 +860,7 @@ fn highlight_search_matches(
         let style = if Some(*match_index) == selected_match {
             base_style.fg(Color::Black).bg(Color::Yellow)
         } else {
-            base_style.add_modifier(Modifier::UNDERLINED)
+            base_style.bg(Color::Rgb(58, 60, 72))
         };
         spans.push(Span::styled(
             chars[start..end].iter().collect::<String>(),
