@@ -901,9 +901,8 @@ impl App {
             self.clear_visual_mode();
             return;
         }
-        let row = self.active_text_row();
-        self.visual_anchor = Some(row);
-        self.visual_cursor = row;
+        self.visual_anchor = Some(self.line_cursor);
+        self.visual_cursor = self.line_cursor;
         self.status = "visual".to_string();
     }
 
@@ -920,14 +919,6 @@ impl App {
             anchor.min(self.visual_cursor),
             anchor.max(self.visual_cursor),
         ))
-    }
-
-    fn active_text_row(&self) -> usize {
-        if let Some(hit) = self.search_matches.get(self.search_match_index) {
-            hit.row
-        } else {
-            self.line_cursor
-        }
     }
 
     fn active_row(&self) -> Option<usize> {
@@ -947,6 +938,13 @@ impl App {
         .total_rows
     }
 
+    fn move_line_cursor(&mut self, delta: isize) {
+        let max_row = self.current_layout_rows().saturating_sub(1) as isize;
+        let next = (self.line_cursor as isize + delta).clamp(0, max_row.max(0)) as usize;
+        self.line_cursor = next;
+        self.ensure_line_cursor_visible();
+    }
+
     fn set_visual_cursor(&mut self, row: usize) {
         let max_row = self.current_layout_rows().saturating_sub(1);
         self.visual_cursor = row.min(max_row);
@@ -958,13 +956,6 @@ impl App {
         let next = (self.visual_cursor as isize + delta).clamp(0, max_row.max(0)) as usize;
         self.visual_cursor = next;
         self.ensure_visual_cursor_visible();
-    }
-
-    fn move_line_cursor(&mut self, delta: isize) {
-        let max_row = self.current_layout_rows().saturating_sub(1) as isize;
-        let next = (self.line_cursor as isize + delta).clamp(0, max_row.max(0)) as usize;
-        self.line_cursor = next;
-        self.ensure_line_cursor_visible();
     }
 
     fn ensure_line_cursor_visible(&mut self) {

@@ -194,19 +194,7 @@ pub fn viewport_lines(
             let in_selection = selection
                 .map(|(start, finish)| row >= start && row <= finish && has_visible_text)
                 .unwrap_or(false);
-            let base_spans = line
-                .spans
-                .iter()
-                .cloned()
-                .map(|span| {
-                    let span_style = span.style;
-                    if in_selection {
-                        span.style(span_style.bg(Color::Rgb(52, 56, 64)))
-                    } else {
-                        span
-                    }
-                })
-                .collect::<Vec<_>>();
+            let base_spans = line.spans.clone();
             let mut prefixed_spans = vec![Span::styled(
                 if is_active_row && in_selection {
                     "▌ "
