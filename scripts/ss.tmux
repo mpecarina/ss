@@ -50,6 +50,32 @@ if [[ "${NEEDS_BUILD}" -eq 1 ]]; then
 fi
 
 PANE_PATH="$(tmux display-message -p '#{pane_current_path}' || true)"
+VIEWER_MARKER="ss-viewer"
+
+focus_existing_viewer() {
+  local viewer_pane_id
+  viewer_pane_id="$(tmux list-panes -a -F '#{pane_id}|#{@ss_role}|#{pane_dead}' | while IFS='|' read -r pane_id pane_role pane_dead; do
+    if [[ "${pane_dead}" == "0" ]] && [[ "${pane_role}" == "${VIEWER_MARKER}" ]]; then
+      printf '%s\n' "${pane_id}"
+      break
+    fi
+  done)"
+  if [[ -z "${viewer_pane_id}" ]]; then
+    return 0
+  fi
+  local viewer_window_id
+  viewer_window_id="$(tmux display-message -p -t "${viewer_pane_id}" '#{window_id}' 2>/dev/null || true)"
+
+  if [[ "${PANE_ID}" == "${viewer_pane_id}" ]]; then
+    exit 0
+  fi
+
+  if [[ -n "${viewer_window_id}" ]] && [[ "${WINDOW_ID}" != "${viewer_window_id}" ]]; then
+    tmux select-window -t "${viewer_window_id}"
+  fi
+  tmux select-pane -t "${viewer_pane_id}"
+  exit 0
+}
 
 CMD=(
   env
@@ -64,16 +90,21 @@ CMD=(
   "${PANE_PATH}"
 )
 
+if [[ "${LAUNCH_MODE}" == "window" ]]; then
+  focus_existing_viewer
+  NEW_PANE_ID="$(tmux new-window -P -F '#{pane_id}|#{window_id}' -n 'ss' -- "${CMD[@]}")"
+  tmux set-option -pt "${NEW_PANE_ID%%|*}" @ss_role "${VIEWER_MARKER}"
+  exit 0
+fi
+
 if [[ "${LAUNCH_MODE}" == "popup" ]]; then
-  tmux display-popup -E -w 90% -h 85% -- "${CMD[@]}"
+  focus_existing_viewer
+  NEW_PANE_ID="$(tmux split-window -P -F '#{pane_id}|#{window_id}' -vf -l 85% -c "${PANE_PATH}" -- "${CMD[@]}")"
+  tmux set-option -pt "${NEW_PANE_ID%%|*}" @ss_role "${VIEWER_MARKER}"
   exit 0
 fi
 
-if [[ "${LAUNCH_MODE}" == "pane" ]]; then
-  CMD_STR=""
-  printf -v CMD_STR '%q ' "${CMD[@]}"
-  tmux respawn-pane -k -c "${PANE_PATH}" -- "${SHELL_BIN}" -lc "${CMD_STR}; exec \"${SHELL_BIN}\" -l"
-  exit 0
-fi
-
-tmux new-window -n "ss" -- "${CMD[@]}"
+CMD_STR=""
+printf -v CMD_STR '%q ' "${CMD[@]}"
+tmux set-option -pt "${PANE_ID}" @ss_role "${VIEWER_MARKER}"
+tmux respawn-pane -k -t "${PANE_ID}" -c "${PANE_PATH}" -- "${SHELL_BIN}" -lc "${CMD_STR}; tmux set-option -pt \"${PANE_ID}\" @ss_role ''; exec \"${SHELL_BIN}\" -l"
