@@ -36,7 +36,7 @@ When a user reports popup/split/pane/window launch problems:
 
 - `pane`: reuse the current pane via `tmux respawn-pane -k`
 - `window`: open a new tmux window
-- `popup`: legacy split-style viewer surface in the wrapper
+- `popup`: open the viewer in a tmux popup via `tmux display-popup`
 
 ## Change Style
 

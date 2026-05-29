@@ -98,9 +98,7 @@ if [[ "${LAUNCH_MODE}" == "window" ]]; then
 fi
 
 if [[ "${LAUNCH_MODE}" == "popup" ]]; then
-  focus_existing_viewer
-  NEW_PANE_ID="$(tmux split-window -P -F '#{pane_id}|#{window_id}' -vf -l 85% -c "${PANE_PATH}" -- "${CMD[@]}")"
-  tmux set-option -pt "${NEW_PANE_ID%%|*}" @ss_role "${VIEWER_MARKER}"
+  tmux display-popup -E -w 90% -h 85% -- "${CMD[@]}"
   exit 0
 fi
 
