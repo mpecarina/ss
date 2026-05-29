@@ -5,13 +5,17 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use crossterm::{ExecutableCommand, execute};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Alignment;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -34,10 +38,29 @@ pub fn run() -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, Hide)?;
+    let keyboard_enhancement = matches!(
+        crossterm::terminal::supports_keyboard_enhancement(),
+        Ok(true)
+    );
+    if keyboard_enhancement {
+        execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+            )
+        )
+        .ok();
+    }
     let backend_term = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend_term)?;
     let result = App::new(dir, deck, tmux, backend).run(&mut terminal);
     disable_raw_mode().ok();
+    if keyboard_enhancement {
+        execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags).ok();
+    }
     execute!(terminal.backend_mut(), Show, LeaveAlternateScreen).ok();
     result
 }
@@ -68,6 +91,22 @@ struct App {
     compositor: ImageCompositor,
     image_debug: String,
     last_visibility_poll: Instant,
+    escape_sequence: EscapeSequence,
+    csi_buffer: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VisualMode {
+    Present,
+    Reader,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum EscapeSequence {
+    #[default]
+    None,
+    Esc,
+    Csi,
 }
 
 impl App {
@@ -103,6 +142,8 @@ impl App {
             image_backend,
             image_debug: String::new(),
             last_visibility_poll: Instant::now(),
+            escape_sequence: EscapeSequence::None,
+            csi_buffer: String::new(),
         };
         app.recompute_outline();
         app
@@ -121,7 +162,9 @@ impl App {
             }
             if event::poll(Duration::from_millis(80))? {
                 match event::read()? {
-                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    Event::Key(key)
+                        if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+                    {
                         if self.handle_key(key, terminal.backend_mut())? {
                             break;
                         }
@@ -148,6 +191,13 @@ impl App {
             return;
         }
 
+        match self.visual_mode() {
+            VisualMode::Present => self.draw_present(frame),
+            VisualMode::Reader => self.draw_reader(frame),
+        }
+    }
+
+    fn draw_reader(&mut self, frame: &mut ratatui::Frame) {
         let size = frame.area();
         let vertical = Layout::default()
             .direction(Direction::Vertical)
@@ -192,6 +242,67 @@ impl App {
         frame.render_widget(self.footer(), vertical[2]);
     }
 
+    fn draw_present(&mut self, frame: &mut ratatui::Frame) {
+        let size = frame.area();
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .split(size);
+        let top = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1), Constraint::Length(8)])
+            .split(vertical[0]);
+        frame.render_widget(
+            Paragraph::new(self.deck.metadata.title.clone())
+                .style(Style::default().fg(Color::DarkGray)),
+            top[0],
+        );
+        frame.render_widget(
+            Paragraph::new(format!("{}/{}", self.current + 1, self.deck.slides.len()))
+                .style(Style::default().fg(Color::Gray))
+                .alignment(Alignment::Right),
+            top[1],
+        );
+
+        let stage = self.presentation_stage(vertical[1]);
+        self.text_rect = Some(stage);
+        self.body_rows = stage.height as usize;
+        let scroll = self.text_scroll;
+        let body_rows = self.body_rows;
+        let matches = self.search_matches.clone();
+        let selected_match = (!matches.is_empty()).then_some(self.search_match_index);
+        let layout = self.layout_for_current(stage.width);
+        let viewport = viewport_lines(layout, scroll, body_rows, &matches, selected_match);
+        frame.render_widget(
+            Paragraph::new(viewport)
+                .wrap(Wrap { trim: false })
+                .alignment(Alignment::Left),
+            stage,
+        );
+
+        let mut bottom = String::new();
+        let scroll_status = self.scroll_status();
+        if !scroll_status.is_empty() {
+            bottom.push_str(&scroll_status);
+        }
+        if !self.status.is_empty() {
+            if !bottom.is_empty() {
+                bottom.push_str("  ");
+            }
+            bottom.push_str(&self.status);
+        }
+        frame.render_widget(
+            Paragraph::new(bottom)
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Center),
+            vertical[2],
+        );
+    }
+
     fn draw_help(&self, frame: &mut ratatui::Frame) {
         frame.render_widget(
             Paragraph::new(vec![
@@ -200,6 +311,7 @@ impl App {
                 Line::from("Navigation: arrows, h j k l, g/G, ctrl-u, ctrl-d, r, q"),
                 Line::from("Search: / current slide, n/N next or previous hit"),
                 Line::from("Outline: o, / filter, enter open"),
+                Line::from("Visuals: presentation mode by default, reader mode while searching"),
                 Line::from("Graphics: explicit image ownership and tmux visibility gating"),
             ]),
             frame.area(),
@@ -282,37 +394,106 @@ impl App {
         } else {
             self.status.clone()
         };
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                format!(" {}/{} ", self.current + 1, self.deck.slides.len()),
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-            Span::styled(
-                format!("backend:{}", self.image_backend.name()),
-                Style::default().fg(Color::Cyan),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                format!("images:{}", slide.assets.len()),
-                Style::default().fg(Color::Blue),
-            ),
-            Span::raw("  "),
-            Span::styled(self.scroll_status(), Style::default().fg(Color::Magenta)),
-            Span::raw("  "),
-            Span::styled(
-                self.image_debug.clone(),
+        let status_is_distinct = !self.status.is_empty() && self.status != mode_status;
+        let mut spans = vec![Span::styled(
+            format!(" {}/{} ", self.current + 1, self.deck.slides.len()),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )];
+        let scroll_status = self.scroll_status();
+        if !scroll_status.is_empty() {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                scroll_status,
+                Style::default().fg(Color::Magenta),
+            ));
+        }
+        if !mode_status.is_empty() {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                mode_status,
                 Style::default().fg(Color::DarkGray),
-            ),
-            Span::raw("  "),
-            Span::styled(mode_status, Style::default().fg(Color::DarkGray)),
-        ]))
+            ));
+        }
+        if status_is_distinct {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                self.status.clone(),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if !slide.assets.is_empty() {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                format!("visuals:{}", slide.assets.len()),
+                Style::default().fg(Color::Blue),
+            ));
+        }
+        Paragraph::new(Line::from(spans))
+    }
+
+    fn visual_mode(&self) -> VisualMode {
+        if self.help
+            || self.outline
+            || self.search_focus
+            || self.outline_search_focus
+            || !self.search.is_empty()
+        {
+            VisualMode::Reader
+        } else {
+            VisualMode::Present
+        }
+    }
+
+    fn presentation_stage(&self, area: Rect) -> Rect {
+        let layout = self
+            .current_slide()
+            .frontmatter
+            .layout
+            .as_deref()
+            .unwrap_or_default();
+        let width = match layout {
+            "image" | "hero" => area.width.saturating_sub(6),
+            _ if area.width > 120 => 88,
+            _ if area.width > 90 => area.width.saturating_sub(16),
+            _ => area.width.saturating_sub(6),
+        }
+        .max(10)
+        .min(area.width);
+        let height = match layout {
+            "image" | "hero" => area.height.saturating_sub(2),
+            _ => area.height.saturating_sub(4),
+        }
+        .max(3)
+        .min(area.height);
+        centered_rect(area, width, height)
     }
 
     fn handle_key(&mut self, key: KeyEvent, stdout: &mut CrosstermBackend<Stdout>) -> Result<bool> {
+        let Some(key) = self.normalize_key_event(key) else {
+            return Ok(false);
+        };
+        if self.help || self.search_focus || self.outline_search_focus {
+            match key.code {
+                KeyCode::Left | KeyCode::Up => {
+                    self.help = false;
+                    self.search_focus = false;
+                    self.outline_search_focus = false;
+                    self.previous_slide();
+                    return Ok(false);
+                }
+                KeyCode::Right | KeyCode::Down => {
+                    self.help = false;
+                    self.search_focus = false;
+                    self.outline_search_focus = false;
+                    self.next_slide();
+                    return Ok(false);
+                }
+                _ => {}
+            }
+        }
         if self.search_focus {
             return Ok(self.handle_search_key(key));
         }
@@ -381,13 +562,10 @@ impl App {
                     if let Some(index) = self.outline_filtered.get(self.outline_index).copied() {
                         self.current = index;
                         self.outline = false;
-                        self.text_scroll = 0;
-                        self.update_search_matches();
+                        self.reset_after_slide_change();
                     }
-                } else if self.current + 1 < self.deck.slides.len() {
-                    self.current += 1;
-                    self.text_scroll = 0;
-                    self.update_search_matches();
+                } else {
+                    self.next_slide();
                 }
             }
             KeyCode::Left
@@ -400,10 +578,8 @@ impl App {
                         self.outline_index -= 1;
                         self.ensure_outline_visible();
                     }
-                } else if self.current > 0 {
-                    self.current -= 1;
-                    self.text_scroll = 0;
-                    self.update_search_matches();
+                } else {
+                    self.previous_slide();
                 }
             }
             KeyCode::Char('d')
@@ -699,6 +875,85 @@ impl App {
     fn current_slide(&self) -> &Slide {
         &self.deck.slides[self.current]
     }
+
+    fn normalize_key_event(&mut self, key: KeyEvent) -> Option<KeyEvent> {
+        match key.code {
+            KeyCode::Esc => {
+                self.escape_sequence = EscapeSequence::Esc;
+                self.csi_buffer.clear();
+                Some(key)
+            }
+            KeyCode::Char('[') | KeyCode::Char('O')
+                if self.escape_sequence == EscapeSequence::Esc =>
+            {
+                self.escape_sequence = EscapeSequence::Csi;
+                self.csi_buffer.clear();
+                None
+            }
+            KeyCode::Char(ch)
+                if self.escape_sequence == EscapeSequence::Csi
+                    && (ch.is_ascii_digit() || ch == ';') =>
+            {
+                self.csi_buffer.push(ch);
+                None
+            }
+            KeyCode::Char(ch) if self.escape_sequence == EscapeSequence::Csi => {
+                self.escape_sequence = EscapeSequence::None;
+                self.csi_buffer.clear();
+                let code = match ch.to_ascii_uppercase() {
+                    'A' => KeyCode::Up,
+                    'B' => KeyCode::Down,
+                    'C' => KeyCode::Right,
+                    'D' => KeyCode::Left,
+                    _ => KeyCode::Char(ch),
+                };
+                Some(KeyEvent { code, ..key })
+            }
+            KeyCode::Char('\u{8}') | KeyCode::Char('\u{7f}') => {
+                self.escape_sequence = EscapeSequence::None;
+                self.csi_buffer.clear();
+                Some(KeyEvent {
+                    code: KeyCode::Backspace,
+                    ..key
+                })
+            }
+            _ => {
+                self.escape_sequence = EscapeSequence::None;
+                self.csi_buffer.clear();
+                Some(key)
+            }
+        }
+    }
+
+    fn next_slide(&mut self) {
+        if self.current + 1 < self.deck.slides.len() {
+            self.current += 1;
+            self.reset_after_slide_change();
+        }
+    }
+
+    fn previous_slide(&mut self) {
+        if self.current > 0 {
+            self.current -= 1;
+            self.reset_after_slide_change();
+        }
+    }
+
+    fn reset_after_slide_change(&mut self) {
+        self.text_scroll = 0;
+        self.update_search_matches();
+    }
+}
+
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
 }
 
 #[cfg(test)]
@@ -799,5 +1054,136 @@ mod tests {
         assert!(app.search.is_empty());
         assert!(app.search_matches.is_empty());
         assert!(app.status.is_empty());
+    }
+
+    #[test]
+    fn previous_slide_moves_back_and_resets_scroll() {
+        let mut deck = sample_deck();
+        deck.slides.push(Slide {
+            id: 1,
+            title: "second".to_string(),
+            name: "01.md".to_string(),
+            ..Slide::default()
+        });
+        let mut app = App::new(
+            PathBuf::from("."),
+            deck,
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+        );
+        app.current = 1;
+        app.text_scroll = 7;
+
+        app.previous_slide();
+
+        assert_eq!(app.current, 0);
+        assert_eq!(app.text_scroll, 0);
+    }
+
+    #[test]
+    fn previous_slide_stops_at_first_slide() {
+        let mut app = App::new(
+            PathBuf::from("."),
+            sample_deck(),
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+        );
+        app.text_scroll = 3;
+
+        app.previous_slide();
+
+        assert_eq!(app.current, 0);
+        assert_eq!(app.text_scroll, 3);
+    }
+
+    #[test]
+    fn next_slide_moves_forward_and_resets_scroll() {
+        let mut deck = sample_deck();
+        deck.slides.push(Slide {
+            id: 1,
+            title: "second".to_string(),
+            name: "01.md".to_string(),
+            ..Slide::default()
+        });
+        let mut app = App::new(
+            PathBuf::from("."),
+            deck,
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+        );
+        app.text_scroll = 5;
+
+        app.next_slide();
+
+        assert_eq!(app.current, 1);
+        assert_eq!(app.text_scroll, 0);
+    }
+
+    #[test]
+    fn arrow_navigation_escapes_search_focus() {
+        let mut deck = sample_deck();
+        deck.slides.push(Slide {
+            id: 1,
+            title: "second".to_string(),
+            name: "01.md".to_string(),
+            ..Slide::default()
+        });
+        let mut app = App::new(
+            PathBuf::from("."),
+            deck,
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+        );
+        app.current = 1;
+        app.search_focus = true;
+        app.search = "term".to_string();
+
+        let _ = app.handle_key(
+            KeyEvent::new(KeyCode::Left, crossterm::event::KeyModifiers::NONE),
+            &mut CrosstermBackend::new(io::stdout()),
+        );
+
+        assert_eq!(app.current, 0);
+        assert!(!app.search_focus);
+    }
+
+    #[test]
+    fn normalize_csi_arrow_sequence_maps_to_arrow_key() {
+        let mut app = App::new(
+            PathBuf::from("."),
+            sample_deck(),
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+        );
+
+        let esc = app.normalize_key_event(KeyEvent::new(
+            KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(matches!(
+            esc,
+            Some(KeyEvent {
+                code: KeyCode::Esc,
+                ..
+            })
+        ));
+
+        let bracket = app.normalize_key_event(KeyEvent::new(
+            KeyCode::Char('['),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(bracket.is_none());
+
+        let arrow = app.normalize_key_event(KeyEvent::new(
+            KeyCode::Char('a'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(matches!(
+            arrow,
+            Some(KeyEvent {
+                code: KeyCode::Up,
+                ..
+            })
+        ));
     }
 }

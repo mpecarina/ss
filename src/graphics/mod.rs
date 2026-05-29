@@ -29,7 +29,6 @@ pub struct ImageHandle {
 
 pub trait ImageBackend {
     fn available(&self) -> bool;
-    fn name(&self) -> &'static str;
     fn draw_sequence(&self, placements: &[OwnedPlacement]) -> String;
     fn delete_sequence(&self, handles: &[ImageHandle]) -> String;
 }
@@ -40,10 +39,6 @@ pub struct NoopBackend;
 impl ImageBackend for NoopBackend {
     fn available(&self) -> bool {
         false
-    }
-
-    fn name(&self) -> &'static str {
-        "disabled"
     }
 
     fn draw_sequence(&self, _placements: &[OwnedPlacement]) -> String {
@@ -71,12 +66,9 @@ impl ImageBackend for KittyBackend {
         true
     }
 
-    fn name(&self) -> &'static str {
-        "kitty"
-    }
-
     fn draw_sequence(&self, placements: &[OwnedPlacement]) -> String {
         let mut out = String::new();
+        out.push_str("\x1b7");
         for placement in placements {
             if !Path::new(&placement.spec.asset_path).exists() {
                 continue;
@@ -86,7 +78,7 @@ impl ImageBackend for KittyBackend {
             let _ = write!(out, "\x1b[{};{}H", placement.spec.row, placement.spec.col);
             let _ = write!(
                 out,
-                "\x1b_Ga=T,f=100,t=f,i={},p={},c={},r={},C=1;{}\x1b\\",
+                "\x1b_Ga=T,f=100,t=f,i={},p={},c={},r={},C=1,q=2;{}\x1b\\",
                 placement.handle.image_id,
                 placement.handle.placement_id,
                 placement.spec.cols,
@@ -94,14 +86,17 @@ impl ImageBackend for KittyBackend {
                 payload
             );
         }
+        out.push_str("\x1b8");
         self.tmux.wrap_passthrough(&out)
     }
 
     fn delete_sequence(&self, handles: &[ImageHandle]) -> String {
         let mut out = String::new();
+        out.push_str("\x1b7");
         for handle in handles {
-            let _ = write!(out, "\x1b_Ga=d,d=i,i={}\x1b\\", handle.image_id);
+            let _ = write!(out, "\x1b_Ga=d,d=i,i={},q=2\x1b\\", handle.image_id);
         }
+        out.push_str("\x1b8");
         self.tmux.wrap_passthrough(&out)
     }
 }
@@ -279,6 +274,7 @@ impl<T> Tap for T {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tmux::TmuxRuntime;
 
     #[test]
     fn compositor_retires_changed_block() {
@@ -302,5 +298,41 @@ mod tests {
         }]);
         assert_eq!(second.retire.len(), 1);
         assert_eq!(second.draw.len(), 1);
+    }
+
+    #[test]
+    fn kitty_draw_sequence_preserves_cursor_state() {
+        let backend = KittyBackend::new(TmuxRuntime::default());
+        let output = backend.draw_sequence(&[OwnedPlacement {
+            handle: ImageHandle {
+                runtime_id: "runtime".to_string(),
+                block_id: 1,
+                image_id: 10,
+                placement_id: 11,
+            },
+            spec: ImagePlacementSpec {
+                block_id: 1,
+                asset_path: "/tmp/does-not-exist.png".to_string(),
+                row: 2,
+                col: 3,
+                cols: 4,
+                rows: 5,
+            },
+        }]);
+        assert!(output.contains("\x1b7"));
+        assert!(output.contains("\x1b8"));
+    }
+
+    #[test]
+    fn kitty_delete_sequence_preserves_cursor_state() {
+        let backend = KittyBackend::new(TmuxRuntime::default());
+        let output = backend.delete_sequence(&[ImageHandle {
+            runtime_id: "runtime".to_string(),
+            block_id: 1,
+            image_id: 10,
+            placement_id: 11,
+        }]);
+        assert!(output.contains("\x1b7"));
+        assert!(output.contains("\x1b8"));
     }
 }
