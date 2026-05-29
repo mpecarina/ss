@@ -497,8 +497,7 @@ impl App {
                 if self.visual_active() {
                     self.set_visual_cursor(0);
                 } else {
-                    self.current = 0;
-                    self.reset_after_slide_change();
+                    self.jump_to_slide_top();
                 }
             }
             KeyCode::Char('G') => {
@@ -506,8 +505,7 @@ impl App {
                     let last = self.current_layout_rows().saturating_sub(1);
                     self.set_visual_cursor(last);
                 } else {
-                    self.current = self.deck.slides.len().saturating_sub(1);
-                    self.reset_after_slide_change();
+                    self.jump_to_slide_bottom();
                 }
             }
             KeyCode::Char('n') if !self.outline => {
@@ -938,6 +936,17 @@ impl App {
                 .unwrap_or(80),
         )
         .total_rows
+    }
+
+    fn jump_to_slide_top(&mut self) {
+        self.line_cursor = 0;
+        self.text_scroll = 0;
+    }
+
+    fn jump_to_slide_bottom(&mut self) {
+        let last_row = self.current_layout_rows().saturating_sub(1);
+        self.line_cursor = last_row;
+        self.ensure_line_cursor_visible();
     }
 
     fn move_line_cursor(&mut self, delta: isize) {
