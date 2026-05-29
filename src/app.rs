@@ -26,6 +26,8 @@ use crate::graphics::{ImageBackend, ImageCompositor, detect_backend, placements_
 use crate::layout::{SearchMatch, SlideLayout, Viewport, build_layout, viewport_lines};
 use crate::tmux::{TmuxRuntime, VisibilityState};
 
+const LINE_GUTTER_WIDTH: u16 = 2;
+
 pub fn run() -> Result<()> {
     let dir = std::env::args()
         .nth(1)
@@ -79,6 +81,7 @@ struct App {
     search_match_index: usize,
     outline_query: String,
     text_scroll: usize,
+    line_cursor: usize,
     body_rows: usize,
     text_rect: Option<Rect>,
     layout_cache: HashMap<(usize, u16), SlideLayout>,
@@ -126,6 +129,7 @@ impl App {
             search_match_index: 0,
             outline_query: String::new(),
             text_scroll: 0,
+            line_cursor: 0,
             body_rows: 0,
             text_rect: None,
             layout_cache: HashMap::new(),
@@ -220,14 +224,16 @@ impl App {
         let body_rows = self.body_rows;
         let matches = self.search_matches.clone();
         let selected_match = (!matches.is_empty()).then_some(self.search_match_index);
+        let active_row = self.active_row();
         let selection = self.visual_selection_range();
-        let layout = self.layout_for_current(stage.width);
+        let layout = self.layout_for_current(content_width(stage.width));
         let viewport = viewport_lines(
             layout,
             scroll,
             body_rows,
             &matches,
             selected_match,
+            active_row,
             selection,
         );
         frame.render_widget(
@@ -238,16 +244,27 @@ impl App {
         );
 
         let mut bottom = String::new();
-        let scroll_status = self.scroll_status();
-        if !scroll_status.is_empty() {
-            bottom.push_str(&scroll_status);
-        }
         let mode_status = self.operational_status();
         if !mode_status.is_empty() {
             if !bottom.is_empty() {
                 bottom.push_str("  ");
             }
             bottom.push_str(&mode_status);
+        }
+        if diagnostics_enabled() {
+            let scroll_status = self.scroll_status();
+            if !scroll_status.is_empty() {
+                if !bottom.is_empty() {
+                    bottom.push_str("  ");
+                }
+                bottom.push_str(&scroll_status);
+            }
+            if !self.status.is_empty() {
+                if !bottom.is_empty() {
+                    bottom.push_str("  ");
+                }
+                bottom.push_str(&self.status);
+            }
         } else if !self.status.is_empty() {
             if !bottom.is_empty() {
                 bottom.push_str("  ");
@@ -380,16 +397,16 @@ impl App {
             .as_deref()
             .unwrap_or_default();
         let width = match layout {
-            "image" | "hero" => area.width.saturating_sub(6),
-            _ if area.width > 120 => 88,
-            _ if area.width > 90 => area.width.saturating_sub(16),
-            _ => area.width.saturating_sub(6),
+            "image" | "hero" => area.width.saturating_sub(4),
+            _ if area.width > 120 => 96,
+            _ if area.width > 90 => area.width.saturating_sub(10),
+            _ => area.width.saturating_sub(4),
         }
         .max(10)
         .min(area.width);
         let height = match layout {
-            "image" | "hero" => area.height.saturating_sub(2),
-            _ => area.height.saturating_sub(4),
+            "image" | "hero" => area.height.saturating_sub(1),
+            _ => area.height.saturating_sub(2),
         }
         .max(3)
         .min(area.height);
@@ -402,7 +419,7 @@ impl App {
         };
         if self.help || self.search_focus || self.outline_search_focus {
             match key.code {
-                KeyCode::Left | KeyCode::Up => {
+                KeyCode::Left => {
                     self.help = false;
                     self.search_focus = false;
                     self.outline_search_focus = false;
@@ -413,7 +430,7 @@ impl App {
                     }
                     return Ok(false);
                 }
-                KeyCode::Right | KeyCode::Down => {
+                KeyCode::Right => {
                     self.help = false;
                     self.search_focus = false;
                     self.outline_search_focus = false;
@@ -439,7 +456,7 @@ impl App {
                 self.help = !self.help;
                 self.outline = false;
             }
-            KeyCode::Char('v') => {
+            KeyCode::Char('V') => {
                 self.toggle_visual_mode();
             }
             KeyCode::Esc => {
@@ -497,12 +514,7 @@ impl App {
             KeyCode::Char('N') if !self.outline => {
                 self.advance_search_match(-1);
             }
-            KeyCode::Enter
-            | KeyCode::Right
-            | KeyCode::Down
-            | KeyCode::Char('j')
-            | KeyCode::Char('l')
-            | KeyCode::Char(' ') => {
+            KeyCode::Right | KeyCode::Char('l') => {
                 if self.outline {
                     if let Some(index) = self.outline_filtered.get(self.outline_index).copied() {
                         self.current = index;
@@ -515,11 +527,7 @@ impl App {
                     self.next_slide();
                 }
             }
-            KeyCode::Left
-            | KeyCode::Up
-            | KeyCode::Char('h')
-            | KeyCode::Char('k')
-            | KeyCode::Backspace => {
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::Backspace => {
                 if self.outline {
                     if self.outline_index > 0 {
                         self.outline_index -= 1;
@@ -529,6 +537,41 @@ impl App {
                     self.move_visual_cursor(-1);
                 } else {
                     self.previous_slide();
+                }
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if self.outline {
+                    if let Some(index) = self.outline_filtered.get(self.outline_index).copied() {
+                        self.current = index;
+                        self.outline = false;
+                        self.reset_after_slide_change();
+                    }
+                } else {
+                    self.next_slide();
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.outline {
+                    if self.outline_index > 0 {
+                        self.outline_index -= 1;
+                        self.ensure_outline_visible();
+                    }
+                } else if self.visual_active() {
+                    self.move_visual_cursor(-1);
+                } else {
+                    self.move_line_cursor(-1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.outline {
+                    if self.outline_index + 1 < self.outline_filtered.len() {
+                        self.outline_index += 1;
+                        self.ensure_outline_visible();
+                    }
+                } else if self.visual_active() {
+                    self.move_visual_cursor(1);
+                } else {
+                    self.move_line_cursor(1);
                 }
             }
             KeyCode::Char('d')
@@ -600,7 +643,9 @@ impl App {
         };
         let slide = self.current_slide().clone();
         let scroll = self.text_scroll;
-        let layout = self.layout_for_current(text_rect.width).clone();
+        let layout = self
+            .layout_for_current(content_width(text_rect.width))
+            .clone();
         let placements = placements_for_view(
             &slide,
             &layout.images,
@@ -652,7 +697,9 @@ impl App {
         self.visibility = next;
         if changed && !self.visibility.safe_to_draw_images() {
             self.clear_images(stdout)?;
-            self.status = "images cleared while tmux pane inactive".to_string();
+            if diagnostics_enabled() {
+                self.status = "images cleared while tmux pane inactive".to_string();
+            }
         }
         Ok(changed)
     }
@@ -679,7 +726,10 @@ impl App {
             return;
         }
 
-        let width = self.text_rect.map(|rect| rect.width).unwrap_or(80);
+        let width = self
+            .text_rect
+            .map(|rect| content_width(rect.width))
+            .unwrap_or(80);
         let query = self.search.to_lowercase();
         let lines = self.layout_for_current(width).lines.clone();
         for line in &lines {
@@ -721,6 +771,7 @@ impl App {
         }
 
         let row = self.search_matches[self.search_match_index].row;
+        self.line_cursor = row;
         if self.visual_active() {
             self.visual_cursor = row;
         }
@@ -747,7 +798,11 @@ impl App {
 
     fn scroll_text(&mut self, delta: isize) {
         let total = self
-            .layout_for_current(self.text_rect.map(|rect| rect.width).unwrap_or(80))
+            .layout_for_current(
+                self.text_rect
+                    .map(|rect| content_width(rect.width))
+                    .unwrap_or(80),
+            )
             .total_rows;
         let max_scroll = total.saturating_sub(self.body_rows);
         let next = if delta < 0 {
@@ -758,6 +813,8 @@ impl App {
         self.text_scroll = next.min(max_scroll);
         if self.visual_active() {
             self.move_visual_cursor(delta);
+        } else {
+            self.move_line_cursor(delta);
         }
     }
 
@@ -766,7 +823,9 @@ impl App {
             .layout_cache
             .get(&(
                 self.current,
-                self.text_rect.map(|rect| rect.width).unwrap_or(80),
+                self.text_rect
+                    .map(|rect| content_width(rect.width))
+                    .unwrap_or(80),
             ))
             .map(|layout| layout.total_rows)
             .unwrap_or(0);
@@ -790,7 +849,9 @@ impl App {
                     .layout_cache
                     .get(&(
                         slide.id,
-                        self.text_rect.map(|rect| rect.width).unwrap_or(80),
+                        self.text_rect
+                            .map(|rect| content_width(rect.width))
+                            .unwrap_or(80),
                     ))
                     .map(|layout| layout.searchable_text.to_lowercase())
                     .unwrap_or_else(|| {
@@ -865,13 +926,25 @@ impl App {
         if let Some(hit) = self.search_matches.get(self.search_match_index) {
             hit.row
         } else {
-            self.text_scroll
+            self.line_cursor
+        }
+    }
+
+    fn active_row(&self) -> Option<usize> {
+        if self.visual_active() {
+            Some(self.visual_cursor)
+        } else {
+            Some(self.line_cursor)
         }
     }
 
     fn current_layout_rows(&mut self) -> usize {
-        self.layout_for_current(self.text_rect.map(|rect| rect.width).unwrap_or(80))
-            .total_rows
+        self.layout_for_current(
+            self.text_rect
+                .map(|rect| content_width(rect.width))
+                .unwrap_or(80),
+        )
+        .total_rows
     }
 
     fn set_visual_cursor(&mut self, row: usize) {
@@ -885,6 +958,26 @@ impl App {
         let next = (self.visual_cursor as isize + delta).clamp(0, max_row.max(0)) as usize;
         self.visual_cursor = next;
         self.ensure_visual_cursor_visible();
+    }
+
+    fn move_line_cursor(&mut self, delta: isize) {
+        let max_row = self.current_layout_rows().saturating_sub(1) as isize;
+        let next = (self.line_cursor as isize + delta).clamp(0, max_row.max(0)) as usize;
+        self.line_cursor = next;
+        self.ensure_line_cursor_visible();
+    }
+
+    fn ensure_line_cursor_visible(&mut self) {
+        if self.body_rows == 0 {
+            return;
+        }
+        if self.line_cursor < self.text_scroll {
+            self.text_scroll = self.line_cursor;
+        } else if self.line_cursor >= self.text_scroll + self.body_rows {
+            self.text_scroll = self
+                .line_cursor
+                .saturating_sub(self.body_rows.saturating_sub(1));
+        }
     }
 
     fn ensure_visual_cursor_visible(&mut self) {
@@ -967,6 +1060,7 @@ impl App {
 
     fn reset_after_slide_change(&mut self) {
         self.text_scroll = 0;
+        self.line_cursor = 0;
         self.update_search_matches();
     }
 }
@@ -980,6 +1074,20 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
         width,
         height,
     )
+}
+
+fn content_width(width: u16) -> u16 {
+    width.saturating_sub(LINE_GUTTER_WIDTH)
+}
+
+fn diagnostics_enabled() -> bool {
+    match std::env::var("SS_DIAGNOSTICS") {
+        Ok(value) => matches!(
+            value.trim().to_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]

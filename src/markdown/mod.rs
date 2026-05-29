@@ -61,6 +61,8 @@ struct ParseState {
     in_table_cell: bool,
     active_link: Option<String>,
     active_image: Option<(usize, String, Option<String>)>,
+    emphasis_depth: usize,
+    strong_depth: usize,
 }
 
 impl ParseState {
@@ -108,6 +110,12 @@ impl ParseState {
             }
             Tag::Link { dest_url, .. } => {
                 self.active_link = Some(dest_url.to_string());
+            }
+            Tag::Emphasis => {
+                self.emphasis_depth += 1;
+            }
+            Tag::Strong => {
+                self.strong_depth += 1;
             }
             Tag::Image {
                 dest_url, title, ..
@@ -187,6 +195,12 @@ impl ParseState {
             TagEnd::Link => {
                 self.active_link = None;
             }
+            TagEnd::Emphasis => {
+                self.emphasis_depth = self.emphasis_depth.saturating_sub(1);
+            }
+            TagEnd::Strong => {
+                self.strong_depth = self.strong_depth.saturating_sub(1);
+            }
             TagEnd::Image => {
                 if let Some((asset_id, alt, title)) = self.active_image.take() {
                     self.flush_paragraph();
@@ -237,6 +251,10 @@ impl ParseState {
                 text,
                 url: url.clone(),
             }
+        } else if self.strong_depth > 0 {
+            Inline::Strong(text)
+        } else if self.emphasis_depth > 0 {
+            Inline::Emphasis(text)
         } else {
             Inline::Text(text)
         });
@@ -314,6 +332,26 @@ mod tests {
             doc.blocks
                 .iter()
                 .any(|block| matches!(block, Block::Image(_)))
+        );
+    }
+
+    #[test]
+    fn parses_emphasis_and_strong_inlines() {
+        let doc = parse_slide("*soft* **bold**", Path::new("."), 0).unwrap();
+        let Block::Paragraph(block) = &doc.blocks[0] else {
+            panic!("expected paragraph block");
+        };
+        assert!(
+            block
+                .content
+                .iter()
+                .any(|inline| matches!(inline, Inline::Emphasis(text) if text == "soft"))
+        );
+        assert!(
+            block
+                .content
+                .iter()
+                .any(|inline| matches!(inline, Inline::Strong(text) if text == "bold"))
         );
     }
 }
