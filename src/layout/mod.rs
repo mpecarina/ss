@@ -196,23 +196,39 @@ pub fn viewport_lines(
     height: usize,
     matches: &[SearchMatch],
     selected_match: Option<usize>,
+    selection: Option<(usize, usize)>,
 ) -> Vec<Line<'static>> {
     let end = scroll.saturating_add(height);
     let mut out = Vec::new();
     for row in scroll..end {
         if let Some(line) = layout.lines.iter().find(|line| line.row == row) {
+            let selection_style = selection
+                .filter(|(start, finish)| row >= *start && row <= *finish)
+                .map(|_| Style::default().bg(Color::DarkGray));
+            let base_spans = line
+                .spans
+                .iter()
+                .cloned()
+                .map(|span| {
+                    if let Some(style) = selection_style {
+                        span.style(style)
+                    } else {
+                        span
+                    }
+                })
+                .collect::<Vec<_>>();
             let row_matches = matches
                 .iter()
                 .enumerate()
                 .filter(|(_, hit)| hit.row == row)
                 .collect::<Vec<_>>();
             if row_matches.is_empty() || line.search_text.is_empty() {
-                out.push(Line::from(line.spans.clone()));
+                out.push(Line::from(base_spans));
                 continue;
             }
 
             let mut spans = Vec::new();
-            for (index, span) in line.spans.iter().enumerate() {
+            for (index, span) in base_spans.iter().enumerate() {
                 if index == line.text_span_index {
                     spans.extend(highlight_search_matches(
                         span.content.as_ref(),

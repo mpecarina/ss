@@ -85,6 +85,8 @@ struct App {
     outline_filtered: Vec<usize>,
     outline_index: usize,
     outline_scroll: usize,
+    visual_anchor: Option<usize>,
+    visual_cursor: usize,
     tmux: TmuxRuntime,
     visibility: VisibilityState,
     image_backend: Box<dyn ImageBackend>,
@@ -130,6 +132,8 @@ impl App {
             outline_filtered: Vec::new(),
             outline_index: 0,
             outline_scroll: 0,
+            visual_anchor: None,
+            visual_cursor: 0,
             visibility: VisibilityState::default(),
             compositor: ImageCompositor::new(tmux.runtime_id.clone()),
             tmux,
@@ -216,8 +220,16 @@ impl App {
         let body_rows = self.body_rows;
         let matches = self.search_matches.clone();
         let selected_match = (!matches.is_empty()).then_some(self.search_match_index);
+        let selection = self.visual_selection_range();
         let layout = self.layout_for_current(stage.width);
-        let viewport = viewport_lines(layout, scroll, body_rows, &matches, selected_match);
+        let viewport = viewport_lines(
+            layout,
+            scroll,
+            body_rows,
+            &matches,
+            selected_match,
+            selection,
+        );
         frame.render_widget(
             Paragraph::new(viewport)
                 .wrap(Wrap { trim: false })
@@ -394,14 +406,22 @@ impl App {
                     self.help = false;
                     self.search_focus = false;
                     self.outline_search_focus = false;
-                    self.previous_slide();
+                    if self.visual_active() {
+                        self.move_visual_cursor(-1);
+                    } else {
+                        self.previous_slide();
+                    }
                     return Ok(false);
                 }
                 KeyCode::Right | KeyCode::Down => {
                     self.help = false;
                     self.search_focus = false;
                     self.outline_search_focus = false;
-                    self.next_slide();
+                    if self.visual_active() {
+                        self.move_visual_cursor(1);
+                    } else {
+                        self.next_slide();
+                    }
                     return Ok(false);
                 }
                 _ => {}
@@ -419,11 +439,16 @@ impl App {
                 self.help = !self.help;
                 self.outline = false;
             }
+            KeyCode::Char('v') => {
+                self.toggle_visual_mode();
+            }
             KeyCode::Esc => {
                 if self.help {
                     self.help = false;
                 } else if self.outline {
                     self.outline = false;
+                } else if self.visual_active() {
+                    self.clear_visual_mode();
                 } else if !self.search.is_empty() {
                     self.clear_search();
                 }
@@ -450,14 +475,21 @@ impl App {
                 self.status = format!("reloaded {} slides", self.deck.slides.len());
             }
             KeyCode::Char('g') => {
-                self.current = 0;
-                self.text_scroll = 0;
-                self.update_search_matches();
+                if self.visual_active() {
+                    self.set_visual_cursor(0);
+                } else {
+                    self.current = 0;
+                    self.reset_after_slide_change();
+                }
             }
             KeyCode::Char('G') => {
-                self.current = self.deck.slides.len().saturating_sub(1);
-                self.text_scroll = 0;
-                self.update_search_matches();
+                if self.visual_active() {
+                    let last = self.current_layout_rows().saturating_sub(1);
+                    self.set_visual_cursor(last);
+                } else {
+                    self.current = self.deck.slides.len().saturating_sub(1);
+                    self.reset_after_slide_change();
+                }
             }
             KeyCode::Char('n') if !self.outline => {
                 self.advance_search_match(1);
@@ -477,6 +509,8 @@ impl App {
                         self.outline = false;
                         self.reset_after_slide_change();
                     }
+                } else if self.visual_active() {
+                    self.move_visual_cursor(1);
                 } else {
                     self.next_slide();
                 }
@@ -491,6 +525,8 @@ impl App {
                         self.outline_index -= 1;
                         self.ensure_outline_visible();
                     }
+                } else if self.visual_active() {
+                    self.move_visual_cursor(-1);
                 } else {
                     self.previous_slide();
                 }
@@ -685,6 +721,9 @@ impl App {
         }
 
         let row = self.search_matches[self.search_match_index].row;
+        if self.visual_active() {
+            self.visual_cursor = row;
+        }
         if row < self.text_scroll {
             self.text_scroll = row;
         } else if row >= self.text_scroll + self.body_rows {
@@ -717,6 +756,9 @@ impl App {
             self.text_scroll.saturating_add(delta as usize)
         };
         self.text_scroll = next.min(max_scroll);
+        if self.visual_active() {
+            self.move_visual_cursor(delta);
+        }
     }
 
     fn scroll_status(&self) -> String {
@@ -789,6 +831,75 @@ impl App {
         &self.deck.slides[self.current]
     }
 
+    fn visual_active(&self) -> bool {
+        self.visual_anchor.is_some()
+    }
+
+    fn toggle_visual_mode(&mut self) {
+        if self.visual_active() {
+            self.clear_visual_mode();
+            return;
+        }
+        let row = self.active_text_row();
+        self.visual_anchor = Some(row);
+        self.visual_cursor = row;
+        self.status = "visual".to_string();
+    }
+
+    fn clear_visual_mode(&mut self) {
+        self.visual_anchor = None;
+        if self.status == "visual" {
+            self.status.clear();
+        }
+    }
+
+    fn visual_selection_range(&self) -> Option<(usize, usize)> {
+        let anchor = self.visual_anchor?;
+        Some((
+            anchor.min(self.visual_cursor),
+            anchor.max(self.visual_cursor),
+        ))
+    }
+
+    fn active_text_row(&self) -> usize {
+        if let Some(hit) = self.search_matches.get(self.search_match_index) {
+            hit.row
+        } else {
+            self.text_scroll
+        }
+    }
+
+    fn current_layout_rows(&mut self) -> usize {
+        self.layout_for_current(self.text_rect.map(|rect| rect.width).unwrap_or(80))
+            .total_rows
+    }
+
+    fn set_visual_cursor(&mut self, row: usize) {
+        let max_row = self.current_layout_rows().saturating_sub(1);
+        self.visual_cursor = row.min(max_row);
+        self.ensure_visual_cursor_visible();
+    }
+
+    fn move_visual_cursor(&mut self, delta: isize) {
+        let max_row = self.current_layout_rows().saturating_sub(1) as isize;
+        let next = (self.visual_cursor as isize + delta).clamp(0, max_row.max(0)) as usize;
+        self.visual_cursor = next;
+        self.ensure_visual_cursor_visible();
+    }
+
+    fn ensure_visual_cursor_visible(&mut self) {
+        if self.body_rows == 0 {
+            return;
+        }
+        if self.visual_cursor < self.text_scroll {
+            self.text_scroll = self.visual_cursor;
+        } else if self.visual_cursor >= self.text_scroll + self.body_rows {
+            self.text_scroll = self
+                .visual_cursor
+                .saturating_sub(self.body_rows.saturating_sub(1));
+        }
+    }
+
     fn normalize_key_event(&mut self, key: KeyEvent) -> Option<KeyEvent> {
         match key.code {
             KeyCode::Esc => {
@@ -841,6 +952,7 @@ impl App {
     fn next_slide(&mut self) {
         if self.current + 1 < self.deck.slides.len() {
             self.current += 1;
+            self.clear_visual_mode();
             self.reset_after_slide_change();
         }
     }
@@ -848,6 +960,7 @@ impl App {
     fn previous_slide(&mut self) {
         if self.current > 0 {
             self.current -= 1;
+            self.clear_visual_mode();
             self.reset_after_slide_change();
         }
     }
