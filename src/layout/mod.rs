@@ -13,11 +13,25 @@ use crate::deck::model::{Block, ImageDisplay, Inline, Slide};
 
 const CODE_PANEL_BG: Color = Color::Rgb(28, 30, 36);
 const CODE_PANEL_EDGE: Color = Color::Rgb(72, 78, 92);
+const IMAGE_PLACEHOLDER: char = '\u{10EEEE}';
+const PLACEHOLDER_DIACRITICS: [char; 64] = [
+    '\u{0305}', '\u{030D}', '\u{030E}', '\u{0310}', '\u{0312}', '\u{033D}', '\u{033E}', '\u{033F}',
+    '\u{0346}', '\u{034A}', '\u{034B}', '\u{034C}', '\u{0350}', '\u{0351}', '\u{0352}', '\u{0357}',
+    '\u{035B}', '\u{0363}', '\u{0364}', '\u{0365}', '\u{0366}', '\u{0367}', '\u{0368}', '\u{0369}',
+    '\u{036A}', '\u{036B}', '\u{036C}', '\u{036D}', '\u{036E}', '\u{036F}', '\u{0483}', '\u{0484}',
+    '\u{0485}', '\u{0486}', '\u{0487}', '\u{0592}', '\u{0593}', '\u{0594}', '\u{0595}', '\u{0597}',
+    '\u{0598}', '\u{0599}', '\u{059C}', '\u{059D}', '\u{059E}', '\u{059F}', '\u{05A0}', '\u{05A1}',
+    '\u{05A8}', '\u{05A9}', '\u{05AB}', '\u{05AC}', '\u{05AF}', '\u{05C4}', '\u{0610}', '\u{0611}',
+    '\u{0612}', '\u{0613}', '\u{0614}', '\u{0615}', '\u{0616}', '\u{0617}', '\u{0657}', '\u{0658}',
+];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Viewport {
     pub width: u16,
     pub height: u16,
+    pub cell_width_px: u16,
+    pub cell_height_px: u16,
+    pub unicode_placeholders: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -34,6 +48,7 @@ pub struct LayoutLine {
     pub spans: Vec<Span<'static>>,
     pub search_text: String,
     pub text_span_index: usize,
+    pub heading_level: Option<u8>,
     pub link_urls: Vec<String>,
     pub link_regions: Vec<LinkRegion>,
 }
@@ -56,10 +71,13 @@ pub struct SearchMatch {
 pub struct LaidOutImage {
     pub block_id: usize,
     pub asset_id: usize,
+    pub image_id: u32,
+    pub placement_id: u32,
     pub start_row: usize,
     pub rows: usize,
     pub cols: u16,
     pub display: ImageDisplay,
+    pub use_unicode_placeholder: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -103,6 +121,7 @@ pub fn build_layout(slide: &Slide, viewport: Viewport) -> SlideLayout {
                     &mut row,
                     &mut lines,
                     &mut searchable_text,
+                    None,
                     None,
                 );
                 push_blank(&mut row, &mut lines, &mut searchable_text);
@@ -157,6 +176,7 @@ pub fn build_layout(slide: &Slide, viewport: Viewport) -> SlideLayout {
                     )],
                     search_text: String::new(),
                     text_span_index: 0,
+                    heading_level: None,
                     link_urls: Vec::new(),
                     link_regions: Vec::new(),
                 });
@@ -164,15 +184,43 @@ pub fn build_layout(slide: &Slide, viewport: Viewport) -> SlideLayout {
                 row += 1;
             }
             Block::Image(block) => {
-                let rows = image_rows(slide, block.asset_id, viewport.width, block.display);
+                let (cols, rows) = image_dimensions(
+                    slide,
+                    block.asset_id,
+                    viewport.width,
+                    block.display,
+                    viewport.cell_width_px,
+                    viewport.cell_height_px,
+                );
+                let image_id = stable_image_id(slide.id, block.id);
+                let placement_id = stable_placement_id(block.id);
+                let use_unicode_placeholder = block.display == ImageDisplay::Inline
+                    && viewport.unicode_placeholders
+                    && image_id <= 0x00FF_FFFF
+                    && rows < PLACEHOLDER_DIACRITICS.len()
+                    && cols as usize <= PLACEHOLDER_DIACRITICS.len();
                 images.push(LaidOutImage {
                     block_id: block.id,
                     asset_id: block.asset_id,
+                    image_id,
+                    placement_id,
                     start_row: row,
                     rows,
-                    cols: viewport.width.saturating_sub(2).max(10),
+                    cols,
                     display: block.display,
+                    use_unicode_placeholder,
                 });
+                if use_unicode_placeholder {
+                    push_image_placeholder_block(
+                        row,
+                        cols,
+                        rows,
+                        image_id,
+                        wrap_width,
+                        &mut lines,
+                        &mut searchable_text,
+                    );
+                }
                 searchable_text.push_str(&format!("[image:{}]\n", block.alt));
                 row += rows;
                 push_blank(&mut row, &mut lines, &mut searchable_text);
@@ -304,6 +352,7 @@ fn push_heading_block(
             spans: vec![Span::styled(accent, Style::default().fg(Color::DarkGray))],
             search_text: String::new(),
             text_span_index: 0,
+            heading_level: None,
             link_urls: Vec::new(),
             link_regions: Vec::new(),
         });
@@ -318,6 +367,7 @@ fn push_heading_block(
         lines,
         searchable_text,
         None,
+        Some(level),
     );
     if level <= 2 {
         let accent = if level == 1 { '═' } else { '─' };
@@ -332,6 +382,7 @@ fn push_heading_block(
             )],
             search_text: String::new(),
             text_span_index: 0,
+            heading_level: None,
             link_urls: Vec::new(),
             link_regions: Vec::new(),
         });
@@ -382,6 +433,7 @@ fn push_quote_block(
         )],
         search_text: String::new(),
         text_span_index: 0,
+        heading_level: None,
         link_urls: Vec::new(),
         link_regions: Vec::new(),
     });
@@ -396,6 +448,7 @@ fn push_quote_block(
         )],
         search_text: String::new(),
         text_span_index: 0,
+        heading_level: None,
         link_urls: Vec::new(),
         link_regions: Vec::new(),
     });
@@ -410,6 +463,7 @@ fn push_quote_block(
         lines,
         searchable_text,
         Some("▎ "),
+        None,
     );
 }
 
@@ -429,6 +483,7 @@ fn push_list_block(
             lines,
             searchable_text,
             Some("◆ "),
+            None,
         );
     }
 }
@@ -457,6 +512,7 @@ fn push_code_block(
         )],
         search_text: String::new(),
         text_span_index: 0,
+        heading_level: None,
         link_urls: Vec::new(),
         link_regions: Vec::new(),
     });
@@ -484,6 +540,7 @@ fn push_code_block(
             spans,
             search_text: raw_line.to_string(),
             text_span_index: 1,
+            heading_level: None,
             link_urls: Vec::new(),
             link_regions: Vec::new(),
         });
@@ -500,6 +557,7 @@ fn push_code_block(
         )],
         search_text: String::new(),
         text_span_index: 0,
+        heading_level: None,
         link_urls: Vec::new(),
         link_regions: Vec::new(),
     });
@@ -539,6 +597,7 @@ fn push_table_block(
         spans: vec![Span::styled(border, Style::default().fg(Color::DarkGray))],
         search_text: String::new(),
         text_span_index: 0,
+        heading_level: None,
         link_urls: Vec::new(),
         link_regions: Vec::new(),
     });
@@ -561,6 +620,7 @@ fn push_table_block(
             )],
             search_text: table_row.join(" "),
             text_span_index: 0,
+            heading_level: None,
             link_urls: Vec::new(),
             link_regions: Vec::new(),
         });
@@ -576,6 +636,7 @@ fn push_table_block(
                 )],
                 search_text: String::new(),
                 text_span_index: 0,
+                heading_level: None,
                 link_urls: Vec::new(),
                 link_regions: Vec::new(),
             });
@@ -592,6 +653,7 @@ fn push_table_block(
         )],
         search_text: String::new(),
         text_span_index: 0,
+        heading_level: None,
         link_urls: Vec::new(),
         link_regions: Vec::new(),
     });
@@ -712,6 +774,7 @@ fn push_rich_inline_lines(
     lines: &mut Vec<LayoutLine>,
     searchable_text: &mut String,
     prefix: Option<&str>,
+    heading_level: Option<u8>,
 ) {
     let prefix_text = prefix.unwrap_or("");
     let chunks = styled_chunks(inlines, base_style);
@@ -764,6 +827,7 @@ fn push_rich_inline_lines(
             spans,
             search_text: search_text.clone(),
             text_span_index,
+            heading_level,
             link_urls,
             link_regions,
         });
@@ -983,21 +1047,86 @@ fn flatten_inline(inlines: &[Inline]) -> String {
     out
 }
 
-fn image_rows(slide: &Slide, asset_id: usize, width: u16, display: ImageDisplay) -> usize {
+fn image_dimensions(
+    slide: &Slide,
+    asset_id: usize,
+    width: u16,
+    display: ImageDisplay,
+    cell_width_px: u16,
+    cell_height_px: u16,
+) -> (u16, usize) {
     let asset = slide.assets.iter().find(|asset| asset.id == asset_id);
-    let cols = width.saturating_sub(2).max(10) as usize;
+    let max_cols = width.saturating_sub(2).max(10);
     let hinted = match display {
-        ImageDisplay::Inline => 12,
-        ImageDisplay::FullWidth => 20,
-        ImageDisplay::Cover => 24,
+        ImageDisplay::Inline => (max_cols, 12),
+        ImageDisplay::FullWidth => (max_cols, 20),
+        ImageDisplay::Cover => (max_cols, 24),
     };
+
     if let Some(size) = asset.and_then(|asset| asset.size) {
-        let ratio = size.height as f32 / size.width.max(1) as f32;
-        ((cols as f32 * ratio) / 2.0).round() as usize
-    } else {
-        hinted
+        match display {
+            ImageDisplay::Inline if cell_width_px > 0 && cell_height_px > 0 => {
+                let cols = ((size.width as f32) / cell_width_px as f32).ceil() as u16;
+                let rows = ((size.height as f32) / cell_height_px as f32).ceil() as usize;
+                return (cols.clamp(1, max_cols), rows.max(1));
+            }
+            _ => {
+                let ratio = size.height as f32 / size.width.max(1) as f32;
+                let rows = (((max_cols as usize) as f32 * ratio) / 2.0).round() as usize;
+                return (max_cols, rows.max(6));
+            }
+        }
     }
-    .max(6)
+
+    (hinted.0, hinted.1.max(6))
+}
+
+fn push_image_placeholder_block(
+    start_row: usize,
+    cols: u16,
+    rows: usize,
+    image_id: u32,
+    wrap_width: usize,
+    lines: &mut Vec<LayoutLine>,
+    searchable_text: &mut String,
+) {
+    let left_pad = ((wrap_width as u16).saturating_sub(cols) / 2) as usize;
+    let fg = Color::Rgb(
+        ((image_id >> 16) & 0xFF) as u8,
+        ((image_id >> 8) & 0xFF) as u8,
+        (image_id & 0xFF) as u8,
+    );
+    for row_index in 0..rows {
+        let mut placeholder_row = String::new();
+        for col_index in 0..cols as usize {
+            placeholder_row.push(IMAGE_PLACEHOLDER);
+            placeholder_row.push(PLACEHOLDER_DIACRITICS[row_index]);
+            placeholder_row.push(PLACEHOLDER_DIACRITICS[col_index]);
+        }
+        let mut spans = Vec::new();
+        if left_pad > 0 {
+            spans.push(Span::raw(" ".repeat(left_pad)));
+        }
+        spans.push(Span::styled(placeholder_row, Style::default().fg(fg)));
+        lines.push(LayoutLine {
+            row: start_row + row_index,
+            spans,
+            search_text: String::new(),
+            text_span_index: 0,
+            heading_level: None,
+            link_urls: Vec::new(),
+            link_regions: Vec::new(),
+        });
+        searchable_text.push('\n');
+    }
+}
+
+fn stable_image_id(slide_id: usize, block_id: usize) -> u32 {
+    (((slide_id as u32) & 0x0FFF) << 12) | (((block_id as u32) + 1) & 0x0FFF)
+}
+
+fn stable_placement_id(block_id: usize) -> u32 {
+    (block_id as u32).saturating_add(1)
 }
 
 fn push_blank(row: &mut usize, lines: &mut Vec<LayoutLine>, searchable_text: &mut String) {
@@ -1006,6 +1135,7 @@ fn push_blank(row: &mut usize, lines: &mut Vec<LayoutLine>, searchable_text: &mu
         spans: vec![Span::raw(String::new())],
         search_text: String::new(),
         text_span_index: 0,
+        heading_level: None,
         link_urls: Vec::new(),
         link_regions: Vec::new(),
     });
@@ -1017,7 +1147,7 @@ fn push_blank(row: &mut usize, lines: &mut Vec<LayoutLine>, searchable_text: &mu
 mod tests {
     use std::path::PathBuf;
 
-    use crate::deck::model::{AssetRef, Block, ParagraphBlock, Slide};
+    use crate::deck::model::{AssetRef, Block, HeadingBlock, ParagraphBlock, Slide};
 
     use super::*;
 
@@ -1040,6 +1170,9 @@ mod tests {
             Viewport {
                 width: 40,
                 height: 10,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                unicode_placeholders: false,
             },
         );
         assert!(!layout.lines.is_empty());
@@ -1062,6 +1195,9 @@ mod tests {
             Viewport {
                 width: 40,
                 height: 10,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                unicode_placeholders: false,
             },
         );
         let line = layout
@@ -1074,5 +1210,108 @@ mod tests {
         assert_eq!(line.link_regions[0].start_col, 0);
         assert_eq!(line.link_regions[0].end_col, 9);
         assert_eq!(line.link_regions[0].url, "https://example.com");
+    }
+
+    #[test]
+    fn heading_rows_preserve_heading_level() {
+        let slide = Slide {
+            blocks: vec![Block::Heading(HeadingBlock {
+                id: 0,
+                level: 2,
+                content: vec![Inline::Text("Section Title".to_string())],
+            })],
+            ..Slide::default()
+        };
+        let layout = build_layout(
+            &slide,
+            Viewport {
+                width: 40,
+                height: 10,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                unicode_placeholders: false,
+            },
+        );
+
+        let heading_line = layout
+            .lines
+            .iter()
+            .find(|line| line.heading_level == Some(2))
+            .expect("expected heading row");
+        assert_eq!(heading_line.search_text, "Section Title");
+    }
+
+    #[test]
+    fn inline_images_use_terminal_cell_pixel_size_when_available() {
+        let slide = Slide {
+            assets: vec![AssetRef {
+                id: 0,
+                path: PathBuf::from("tiny.png"),
+                size: Some(crate::deck::model::AssetSize {
+                    width: 72,
+                    height: 72,
+                }),
+            }],
+            blocks: vec![Block::Image(crate::deck::model::ImageBlock {
+                id: 0,
+                asset_id: 0,
+                alt: "tiny".to_string(),
+                title: None,
+                display: ImageDisplay::Inline,
+            })],
+            ..Slide::default()
+        };
+        let layout = build_layout(
+            &slide,
+            Viewport {
+                width: 40,
+                height: 10,
+                cell_width_px: 9,
+                cell_height_px: 18,
+                unicode_placeholders: false,
+            },
+        );
+
+        assert_eq!(layout.images[0].cols, 8);
+        assert_eq!(layout.images[0].rows, 4);
+    }
+
+    #[test]
+    fn inline_images_render_unicode_placeholders_when_enabled() {
+        let slide = Slide {
+            assets: vec![AssetRef {
+                id: 0,
+                path: PathBuf::from("tiny.png"),
+                size: Some(crate::deck::model::AssetSize {
+                    width: 72,
+                    height: 72,
+                }),
+            }],
+            blocks: vec![Block::Image(crate::deck::model::ImageBlock {
+                id: 0,
+                asset_id: 0,
+                alt: "tiny".to_string(),
+                title: None,
+                display: ImageDisplay::Inline,
+            })],
+            ..Slide::default()
+        };
+        let layout = build_layout(
+            &slide,
+            Viewport {
+                width: 40,
+                height: 10,
+                cell_width_px: 9,
+                cell_height_px: 18,
+                unicode_placeholders: true,
+            },
+        );
+
+        assert!(layout.images[0].use_unicode_placeholder);
+        assert!(layout.lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.contains('\u{10EEEE}'))
+        }));
     }
 }

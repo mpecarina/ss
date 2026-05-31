@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use base64::Engine;
 
@@ -17,6 +16,9 @@ pub struct ImagePlacementSpec {
     pub col: u16,
     pub cols: u16,
     pub rows: u16,
+    pub image_id: u32,
+    pub placement_id: u32,
+    pub unicode_placeholder: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -75,16 +77,28 @@ impl ImageBackend for KittyBackend {
             }
             let payload = base64::engine::general_purpose::STANDARD
                 .encode(placement.spec.asset_path.as_bytes());
-            let _ = write!(out, "\x1b[{};{}H", placement.spec.row, placement.spec.col);
-            let _ = write!(
-                out,
-                "\x1b_Ga=T,f=100,t=f,i={},p={},c={},r={},C=1,q=2;{}\x1b\\",
-                placement.handle.image_id,
-                placement.handle.placement_id,
-                placement.spec.cols,
-                placement.spec.rows,
-                payload
-            );
+            if placement.spec.unicode_placeholder {
+                let _ = write!(
+                    out,
+                    "\x1b_Ga=T,f=100,t=f,i={},p={},U=1,c={},r={},q=2;{}\x1b\\",
+                    placement.spec.image_id,
+                    placement.spec.placement_id,
+                    placement.spec.cols,
+                    placement.spec.rows,
+                    payload
+                );
+            } else {
+                let _ = write!(out, "\x1b[{};{}H", placement.spec.row, placement.spec.col);
+                let _ = write!(
+                    out,
+                    "\x1b_Ga=T,f=100,t=f,i={},p={},c={},r={},C=1,q=2;{}\x1b\\",
+                    placement.spec.image_id,
+                    placement.spec.placement_id,
+                    placement.spec.cols,
+                    placement.spec.rows,
+                    payload
+                );
+            }
         }
         out.push_str("\x1b8");
         self.tmux.wrap_passthrough(&out)
@@ -107,18 +121,24 @@ pub struct OwnedPlacement {
     pub spec: ImagePlacementSpec,
 }
 
-#[derive(Default)]
 pub struct ImageCompositor {
     runtime_id: String,
-    next_image_id: AtomicU32,
     visible: BTreeMap<usize, OwnedPlacement>,
+}
+
+impl Default for ImageCompositor {
+    fn default() -> Self {
+        Self {
+            runtime_id: String::new(),
+            visible: BTreeMap::new(),
+        }
+    }
 }
 
 impl ImageCompositor {
     pub fn new(runtime_id: String) -> Self {
         Self {
             runtime_id,
-            next_image_id: AtomicU32::new(1),
             visible: BTreeMap::new(),
         }
     }
@@ -156,8 +176,8 @@ impl ImageCompositor {
                 handle: ImageHandle {
                     runtime_id: self.runtime_id.clone(),
                     block_id,
-                    image_id: self.next_id(),
-                    placement_id: self.next_id(),
+                    image_id: spec.image_id,
+                    placement_id: spec.placement_id,
                 },
                 spec,
             };
@@ -174,10 +194,6 @@ impl ImageCompositor {
             .map(|owned| owned.handle.clone())
             .collect::<Vec<_>>()
             .tap(|_| self.visible.clear())
-    }
-
-    fn next_id(&self) -> u32 {
-        self.next_image_id.fetch_add(1, Ordering::Relaxed)
     }
 }
 
@@ -224,6 +240,7 @@ pub fn placements_for_view(
     scroll: usize,
     body_y: u16,
     body_x: u16,
+    body_width: u16,
     body_height: u16,
     pane_y: u16,
     pane_x: u16,
@@ -239,6 +256,13 @@ pub fn placements_for_view(
                 .iter()
                 .find(|asset| asset.id == image.asset_id)?;
             let local_row = image.start_row.saturating_sub(scroll) as u16;
+            let col_offset = if image.display == crate::deck::model::ImageDisplay::Inline
+                && image.cols < body_width
+            {
+                body_width.saturating_sub(image.cols) / 2
+            } else {
+                0
+            };
             Some(ImagePlacementSpec {
                 block_id: image.block_id,
                 asset_path: asset.path.to_string_lossy().to_string(),
@@ -246,9 +270,15 @@ pub fn placements_for_view(
                     .saturating_add(body_y)
                     .saturating_add(local_row)
                     .saturating_add(1),
-                col: pane_x.saturating_add(body_x).saturating_add(1),
+                col: pane_x
+                    .saturating_add(body_x)
+                    .saturating_add(col_offset)
+                    .saturating_add(1),
                 cols: image.cols,
                 rows: image.rows.min(body_height as usize) as u16,
+                image_id: image.image_id,
+                placement_id: image.placement_id,
+                unicode_placeholder: image.use_unicode_placeholder,
             })
         })
         .collect()
@@ -273,8 +303,12 @@ impl<T> Tap for T {}
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
+    use crate::deck::model::{AssetRef, ImageDisplay};
     use crate::tmux::TmuxRuntime;
+    use tempfile::tempdir;
 
     #[test]
     fn compositor_retires_changed_block() {
@@ -286,6 +320,9 @@ mod tests {
             col: 1,
             cols: 10,
             rows: 5,
+            image_id: 10,
+            placement_id: 11,
+            unicode_placeholder: false,
         }]);
         assert_eq!(first.draw.len(), 1);
         let second = compositor.reconcile(vec![ImagePlacementSpec {
@@ -295,6 +332,9 @@ mod tests {
             col: 1,
             cols: 10,
             rows: 5,
+            image_id: 10,
+            placement_id: 11,
+            unicode_placeholder: false,
         }]);
         assert_eq!(second.retire.len(), 1);
         assert_eq!(second.draw.len(), 1);
@@ -317,10 +357,41 @@ mod tests {
                 col: 3,
                 cols: 4,
                 rows: 5,
+                image_id: 10,
+                placement_id: 11,
+                unicode_placeholder: false,
             },
         }]);
         assert!(output.contains("\x1b7"));
         assert!(output.contains("\x1b8"));
+    }
+
+    #[test]
+    fn kitty_draw_sequence_supports_unicode_placeholders() {
+        let backend = KittyBackend::new(TmuxRuntime::default());
+        let temp = tempdir().expect("tempdir");
+        let image = temp.path().join("tiny.png");
+        fs::write(&image, b"png").expect("write image file");
+        let output = backend.draw_sequence(&[OwnedPlacement {
+            handle: ImageHandle {
+                runtime_id: "runtime".to_string(),
+                block_id: 1,
+                image_id: 10,
+                placement_id: 11,
+            },
+            spec: ImagePlacementSpec {
+                block_id: 1,
+                asset_path: image.display().to_string(),
+                row: 2,
+                col: 3,
+                cols: 4,
+                rows: 5,
+                image_id: 10,
+                placement_id: 11,
+                unicode_placeholder: true,
+            },
+        }]);
+        assert!(output.contains("U=1"));
     }
 
     #[test]
@@ -334,5 +405,43 @@ mod tests {
         }]);
         assert!(output.contains("\x1b7"));
         assert!(output.contains("\x1b8"));
+    }
+
+    #[test]
+    fn placements_center_smaller_inline_images() {
+        let slide = Slide {
+            assets: vec![AssetRef {
+                id: 0,
+                path: "tiny.png".into(),
+                size: None,
+            }],
+            ..Slide::default()
+        };
+        let placements = placements_for_view(
+            &slide,
+            &[LaidOutImage {
+                block_id: 1,
+                asset_id: 0,
+                image_id: 7,
+                placement_id: 9,
+                start_row: 0,
+                rows: 4,
+                cols: 8,
+                display: ImageDisplay::Inline,
+                use_unicode_placeholder: false,
+            }],
+            0,
+            2,
+            4,
+            20,
+            10,
+            1,
+            1,
+        );
+
+        assert_eq!(placements[0].col, 12);
+        assert_eq!(placements[0].image_id, 7);
+        assert_eq!(placements[0].placement_id, 9);
+        assert!(!placements[0].unicode_placeholder);
     }
 }

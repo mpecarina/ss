@@ -11,6 +11,7 @@ use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyboardEnhancementFlags,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
+use crossterm::terminal::window_size;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -97,7 +98,7 @@ struct App {
     line_cursor: usize,
     body_rows: usize,
     text_rect: Option<Rect>,
-    layout_cache: HashMap<(usize, u16), SlideLayout>,
+    layout_cache: HashMap<(usize, u16, u16, u16), SlideLayout>,
     outline_filtered: Vec<usize>,
     outline_index: usize,
     outline_scroll: usize,
@@ -316,9 +317,9 @@ impl App {
             Paragraph::new(vec![
                 Line::from("ss help"),
                 Line::from(""),
-                Line::from("Navigation: arrows, h j k l, g/G, ctrl-u, ctrl-d, r, q"),
+                Line::from("Navigation: arrows, h j k l, g/G, [ ], ctrl-u, ctrl-d, r, q"),
                 Line::from("Links: move to a linked line and press enter to open it"),
-                Line::from("Search: / current slide, n/N next or previous hit"),
+                Line::from("Search: / current slide, n/N next or previous hit, [ ] heading jumps"),
                 Line::from("Outline: o, / filter, enter open"),
                 Line::from("Visuals: presentation mode stays active during search and overlays"),
                 Line::from("Graphics: explicit image ownership and tmux visibility gating"),
@@ -542,6 +543,12 @@ impl App {
             }
             KeyCode::Char('N') if !self.outline => {
                 self.advance_search_match(-1);
+            }
+            KeyCode::Char('[') => {
+                self.jump_heading(-1);
+            }
+            KeyCode::Char(']') => {
+                self.jump_heading(1);
             }
             KeyCode::Right | KeyCode::Char('l') => {
                 if self.outline {
@@ -807,6 +814,7 @@ impl App {
             scroll,
             text_rect.y,
             text_rect.x,
+            text_rect.width,
             text_rect.height,
             self.visibility.pane_top,
             self.visibility.pane_left,
@@ -860,13 +868,17 @@ impl App {
     }
 
     fn layout_for_current(&mut self, width: u16) -> &SlideLayout {
-        let key = (self.current, width);
+        let (cell_width_px, cell_height_px) = terminal_cell_size();
+        let key = (self.current, width, cell_width_px, cell_height_px);
         self.layout_cache.entry(key).or_insert_with(|| {
             build_layout(
                 &self.deck.slides[self.current],
                 Viewport {
                     width,
                     height: self.body_rows as u16,
+                    cell_width_px,
+                    cell_height_px,
+                    unicode_placeholders: self.image_backend.available(),
                 },
             )
         })
@@ -973,7 +985,50 @@ impl App {
         }
     }
 
+    fn jump_heading(&mut self, delta: isize) {
+        self.jump_to_matching_heading(delta, |level| level.is_some());
+    }
+
+    fn jump_to_matching_heading(&mut self, delta: isize, predicate: impl Fn(Option<u8>) -> bool) {
+        let current_row = if self.visual_active() {
+            self.visual_cursor
+        } else {
+            self.line_cursor
+        };
+        let width = self
+            .text_rect
+            .map(|rect| content_width(rect.width))
+            .unwrap_or(80);
+        let matches = self
+            .layout_for_current(width)
+            .lines
+            .iter()
+            .filter(|line| predicate(line.heading_level))
+            .map(|line| line.row)
+            .collect::<Vec<_>>();
+
+        if matches.is_empty() {
+            return;
+        }
+
+        let target = if delta < 0 {
+            matches.iter().rev().copied().find(|row| *row < current_row)
+        } else {
+            matches.iter().copied().find(|row| *row > current_row)
+        };
+
+        if let Some(row) = target {
+            self.line_cursor = row;
+            self.ensure_line_cursor_visible();
+            if self.visual_active() {
+                self.visual_cursor = row;
+                self.ensure_visual_cursor_visible();
+            }
+        }
+    }
+
     fn scroll_status(&self) -> String {
+        let (cell_width_px, cell_height_px) = terminal_cell_size();
         let total = self
             .layout_cache
             .get(&(
@@ -981,6 +1036,8 @@ impl App {
                 self.text_rect
                     .map(|rect| content_width(rect.width))
                     .unwrap_or(80),
+                cell_width_px,
+                cell_height_px,
             ))
             .map(|layout| layout.total_rows)
             .unwrap_or(0);
@@ -993,6 +1050,7 @@ impl App {
 
     fn recompute_outline(&mut self) {
         let query = self.outline_query.trim().to_lowercase();
+        let (cell_width_px, cell_height_px) = terminal_cell_size();
         self.outline_filtered = self
             .deck
             .slides
@@ -1007,6 +1065,8 @@ impl App {
                         self.text_rect
                             .map(|rect| content_width(rect.width))
                             .unwrap_or(80),
+                        cell_width_px,
+                        cell_height_px,
                     ))
                     .map(|layout| layout.searchable_text.to_lowercase())
                     .unwrap_or_else(|| {
@@ -1015,6 +1075,9 @@ impl App {
                             Viewport {
                                 width: 80,
                                 height: 24,
+                                cell_width_px,
+                                cell_height_px,
+                                unicode_placeholders: self.image_backend.available(),
                             },
                         )
                         .searchable_text
@@ -1310,6 +1373,16 @@ fn content_width(width: u16) -> u16 {
     width.saturating_sub(LINE_GUTTER_WIDTH)
 }
 
+fn terminal_cell_size() -> (u16, u16) {
+    let Ok(window) = window_size() else {
+        return (0, 0);
+    };
+    if window.columns == 0 || window.rows == 0 || window.width == 0 || window.height == 0 {
+        return (0, 0);
+    }
+    (window.width / window.columns, window.height / window.rows)
+}
+
 fn watched_paths(dir: &Path, deck: &Deck) -> Vec<PathBuf> {
     if deck.slides.len() == 1 && dir.is_file() {
         return vec![deck.slides[0].path.clone()];
@@ -1439,7 +1512,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use crate::deck::model::{Block, DeckMetadata, ParagraphBlock, Slide};
+    use crate::deck::model::{Block, DeckMetadata, HeadingBlock, Inline, ParagraphBlock, Slide};
     use crate::graphics::NoopBackend;
     use tempfile::tempdir;
 
@@ -1877,6 +1950,95 @@ mod tests {
         app.move_visual_cursor(1);
 
         assert_eq!(app.visual_cursor, 2);
+    }
+
+    #[test]
+    fn bracket_motions_jump_between_headings_within_current_slide() {
+        let deck = Deck {
+            root: PathBuf::from("."),
+            metadata: DeckMetadata {
+                title: "deck".to_string(),
+            },
+            slides: vec![Slide {
+                id: 0,
+                title: "title".to_string(),
+                name: "00.md".to_string(),
+                blocks: vec![
+                    Block::Heading(HeadingBlock {
+                        id: 0,
+                        level: 1,
+                        content: vec![Inline::Text("Intro".to_string())],
+                    }),
+                    Block::Paragraph(ParagraphBlock {
+                        id: 1,
+                        content: vec![Inline::Text("alpha".to_string())],
+                    }),
+                    Block::Heading(HeadingBlock {
+                        id: 2,
+                        level: 2,
+                        content: vec![Inline::Text("Details".to_string())],
+                    }),
+                    Block::Paragraph(ParagraphBlock {
+                        id: 3,
+                        content: vec![Inline::Text("beta".to_string())],
+                    }),
+                    Block::Heading(HeadingBlock {
+                        id: 4,
+                        level: 3,
+                        content: vec![Inline::Text("Deep Dive".to_string())],
+                    }),
+                ],
+                ..Slide::default()
+            }],
+        };
+        let mut app = App::new(
+            PathBuf::from("."),
+            deck,
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+            false,
+        );
+        app.body_rows = 12;
+        app.text_rect = Some(Rect::new(0, 0, 40, 12));
+
+        app.jump_heading(1);
+        assert_eq!(app.line_cursor, 1);
+
+        app.jump_heading(1);
+        assert_eq!(app.line_cursor, 6);
+
+        app.jump_heading(-1);
+        assert_eq!(app.line_cursor, 1);
+    }
+
+    #[test]
+    fn bracket_motion_does_not_change_slides() {
+        let mut deck = sample_deck();
+        deck.slides.push(Slide {
+            id: 1,
+            title: "second".to_string(),
+            name: "01.md".to_string(),
+            ..Slide::default()
+        });
+        deck.slides[0].blocks = vec![Block::Heading(HeadingBlock {
+            id: 0,
+            level: 1,
+            content: vec![Inline::Text("Only heading".to_string())],
+        })];
+
+        let mut app = App::new(
+            PathBuf::from("."),
+            deck,
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+            false,
+        );
+        app.body_rows = 8;
+        app.text_rect = Some(Rect::new(0, 0, 40, 8));
+
+        app.jump_heading(1);
+
+        assert_eq!(app.current, 0);
     }
 
     #[test]

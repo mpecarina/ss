@@ -58,22 +58,7 @@ prefix + U    update
 ```
 
 `bin/ss` is a tracked wrapper that auto-builds `target/release/ss` when the
-binary is missing or the git commit changed, matching the `rustasshn` model.
-
-## Why Rust
-
-This repo now treats the Rust tmux app as the primary runtime path.
-
-The old Go implementation is no longer the main build/run surface because the
-important requirement is tmux-aware image lifecycle management:
-
-- pane-first launch
-- pane/window focus awareness
-- clearing kitty graphics when the viewer is not the active tmux pane/window
-
-That prevents images from leaking over other tmux windows.
-
-## Current Behavior
+binary is missing or the git commit changed
 
 - each `*.md` file in the target directory is one slide
 - natural filename sorting (`00_`, `01_`, `10_`, etc.)
@@ -88,6 +73,7 @@ That prevents images from leaking over other tmux windows.
 - `h`, `k`, `left`, `backspace`: previous slide
 - `g`, `gg`: first slide
 - `G`: last slide
+- `[` / `]`: previous / next heading in the current slide
 - `enter`: open the first markdown link on the active line, otherwise next slide
 - `o`: outline / slide list
 - `/`: search current slide, or filter outline when outline is open
