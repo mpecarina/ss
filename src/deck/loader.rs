@@ -15,6 +15,9 @@ struct RawFrontmatter {
 
 pub fn load_deck(dir: &Path) -> Result<Deck> {
     let metadata = fs::metadata(dir).with_context(|| format!("stat {}", dir.display()))?;
+    if metadata.is_file() {
+        return load_single_slide(dir);
+    }
     if !metadata.is_dir() {
         bail!("{} is not a directory", dir.display());
     }
@@ -70,6 +73,48 @@ pub fn load_deck(dir: &Path) -> Result<Deck> {
         root: dir.to_path_buf(),
         metadata: DeckMetadata { title },
         slides,
+    })
+}
+
+fn load_single_slide(path: &Path) -> Result<Deck> {
+    if !path
+        .extension()
+        .map(|v| v.eq_ignore_ascii_case("md"))
+        .unwrap_or(false)
+    {
+        bail!("{} is not a markdown file", path.display());
+    }
+
+    let absolute_path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let raw = fs::read_to_string(&absolute_path)
+        .with_context(|| format!("read {}", absolute_path.display()))?;
+    let (body, frontmatter) = parse_frontmatter(&raw);
+    let parent = absolute_path.parent().unwrap_or_else(|| Path::new("."));
+    let document = markdown::parse_slide(&body, parent, 0)?;
+    let title = markdown::slide_title(&document).unwrap_or_else(|| fallback_title(&absolute_path));
+
+    Ok(Deck {
+        root: parent.to_path_buf(),
+        metadata: DeckMetadata {
+            title: absolute_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+        },
+        slides: vec![Slide {
+            id: 0,
+            path: absolute_path.clone(),
+            name: absolute_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+            title,
+            frontmatter,
+            blocks: document.blocks,
+            assets: document.assets,
+        }],
     })
 }
 
@@ -175,5 +220,18 @@ mod tests {
         ];
         items.sort_by(|a, b| natural_key(a.file_name(), b.file_name()));
         assert_eq!(items[0].to_string_lossy(), "01_first.md");
+    }
+
+    #[test]
+    fn load_deck_accepts_single_markdown_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let slide = temp.path().join("01_intro.md");
+        fs::write(&slide, "# Intro\n\nhello\n").expect("write slide");
+
+        let deck = load_deck(&slide).expect("load single slide");
+
+        assert_eq!(deck.slides.len(), 1);
+        assert_eq!(deck.slides[0].name, "01_intro.md");
+        assert_eq!(deck.metadata.title, "01_intro.md");
     }
 }

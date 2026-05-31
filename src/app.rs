@@ -77,10 +77,12 @@ struct App {
     outline: bool,
     search_focus: bool,
     outline_search_focus: bool,
+    command_focus: bool,
     search: String,
     search_matches: Vec<SearchMatch>,
     search_match_index: usize,
     outline_query: String,
+    command: String,
     text_scroll: usize,
     line_cursor: usize,
     body_rows: usize,
@@ -125,10 +127,12 @@ impl App {
             outline: false,
             search_focus: false,
             outline_search_focus: false,
+            command_focus: false,
             search: String::new(),
             search_matches: Vec::new(),
             search_match_index: 0,
             outline_query: String::new(),
+            command: String::new(),
             text_scroll: 0,
             line_cursor: 0,
             body_rows: 0,
@@ -386,6 +390,8 @@ impl App {
             format!("/{}", self.search)
         } else if self.outline_search_focus {
             format!("/{}", self.outline_query)
+        } else if self.command_focus {
+            format!(":{}", self.command)
         } else {
             String::new()
         }
@@ -419,12 +425,13 @@ impl App {
         let Some(key) = self.normalize_key_event(key) else {
             return Ok(false);
         };
-        if self.help || self.search_focus || self.outline_search_focus {
+        if self.help || self.search_focus || self.outline_search_focus || self.command_focus {
             match key.code {
                 KeyCode::Left => {
                     self.help = false;
                     self.search_focus = false;
                     self.outline_search_focus = false;
+                    self.command_focus = false;
                     if self.visual_active() {
                         self.move_visual_cursor(-1);
                     } else {
@@ -436,6 +443,7 @@ impl App {
                     self.help = false;
                     self.search_focus = false;
                     self.outline_search_focus = false;
+                    self.command_focus = false;
                     if self.visual_active() {
                         self.move_visual_cursor(1);
                     } else {
@@ -451,6 +459,9 @@ impl App {
         }
         if self.outline_search_focus {
             return Ok(self.handle_outline_search_key(key));
+        }
+        if self.command_focus {
+            return self.handle_command_key(key, stdout);
         }
         match key.code {
             KeyCode::Char('q') => return Ok(true),
@@ -486,14 +497,12 @@ impl App {
                     self.update_search_matches();
                 }
             }
+            KeyCode::Char(':') => {
+                self.command_focus = true;
+                self.command.clear();
+            }
             KeyCode::Char('r') => {
-                self.clear_images(stdout)?;
-                self.deck = load_deck(&self.dir)?;
-                self.layout_cache.clear();
-                self.current = self.current.min(self.deck.slides.len().saturating_sub(1));
-                self.update_search_matches();
-                self.recompute_outline();
-                self.status = format!("reloaded {} slides", self.deck.slides.len());
+                self.reload_current_path(stdout)?;
             }
             KeyCode::Char('g') => {
                 if self.visual_active() {
@@ -632,6 +641,103 @@ impl App {
             _ => {}
         }
         false
+    }
+
+    fn handle_command_key(
+        &mut self,
+        key: KeyEvent,
+        stdout: &mut CrosstermBackend<Stdout>,
+    ) -> Result<bool> {
+        match key.code {
+            KeyCode::Esc => {
+                self.command_focus = false;
+                self.command.clear();
+            }
+            KeyCode::Enter => {
+                self.command_focus = false;
+                let command = self.command.trim().to_string();
+                self.command.clear();
+                if !command.is_empty() {
+                    return self.execute_command(&command, stdout);
+                }
+            }
+            KeyCode::Backspace => {
+                self.command.pop();
+            }
+            KeyCode::Char(ch) => {
+                self.command.push(ch);
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn execute_command(
+        &mut self,
+        command: &str,
+        stdout: &mut CrosstermBackend<Stdout>,
+    ) -> Result<bool> {
+        let trimmed = command.trim();
+        if trimmed == "q" || trimmed == "quit" {
+            return Ok(true);
+        }
+
+        if trimmed == "r" || trimmed == "reload" {
+            self.reload_current_path(stdout)?;
+            return Ok(false);
+        }
+
+        if trimmed == "p" || trimmed == "path" {
+            self.status = self.dir.display().to_string();
+            return Ok(false);
+        }
+
+        if let Some(path) = trimmed
+            .strip_prefix("open ")
+            .or_else(|| trimmed.strip_prefix("e "))
+        {
+            self.open_path(path.trim(), stdout)?;
+            return Ok(false);
+        }
+
+        self.status = format!("unknown command: :{}", trimmed);
+        Ok(false)
+    }
+
+    fn reload_current_path(&mut self, stdout: &mut CrosstermBackend<Stdout>) -> Result<()> {
+        self.clear_images(stdout)?;
+        self.deck = load_deck(&self.dir)?;
+        self.layout_cache.clear();
+        self.current = self.current.min(self.deck.slides.len().saturating_sub(1));
+        self.update_search_matches();
+        self.recompute_outline();
+        self.status = format!("reloaded {} slides", self.deck.slides.len());
+        Ok(())
+    }
+
+    fn open_path(&mut self, path: &str, stdout: &mut CrosstermBackend<Stdout>) -> Result<()> {
+        let target = PathBuf::from(path);
+        let resolved = if target.is_absolute() {
+            target
+        } else {
+            self.dir.join(target)
+        };
+
+        self.clear_images(stdout)?;
+        self.dir = resolved;
+        self.deck = load_deck(&self.dir)?;
+        self.layout_cache.clear();
+        self.current = 0;
+        self.text_scroll = 0;
+        self.line_cursor = 0;
+        self.visual_anchor = None;
+        self.visual_cursor = 0;
+        self.search.clear();
+        self.search_matches.clear();
+        self.search_match_index = 0;
+        self.recompute_outline();
+        self.status = format!("opened {}", self.dir.display());
+        Ok(())
     }
 
     fn draw_images(&mut self, stdout: &mut CrosstermBackend<Stdout>) -> Result<()> {
@@ -1254,10 +1360,12 @@ fn diagnostics_enabled() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
 
     use crate::deck::model::{Block, DeckMetadata, ParagraphBlock, Slide};
     use crate::graphics::NoopBackend;
+    use tempfile::tempdir;
 
     use super::*;
 
@@ -1555,6 +1663,52 @@ mod tests {
         let link = app.first_link_on_row(0);
 
         assert_eq!(link, None);
+    }
+
+    #[test]
+    fn command_open_loads_new_markdown_target() {
+        let temp = tempdir().expect("tempdir");
+        let slides_dir = temp.path().join("slides");
+        fs::create_dir_all(&slides_dir).expect("create slides dir");
+        fs::write(slides_dir.join("01_one.md"), "# One\n").expect("write first slide");
+        fs::write(temp.path().join("single.md"), "# Single\n").expect("write single slide");
+
+        let mut app = App::new(
+            slides_dir.clone(),
+            load_deck(&slides_dir).expect("load initial deck"),
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+        );
+
+        let mut stdout = CrosstermBackend::new(io::stdout());
+        let should_quit = app
+            .execute_command(
+                &format!("open {}", temp.path().join("single.md").display()),
+                &mut stdout,
+            )
+            .expect("execute command");
+
+        assert!(!should_quit);
+        assert_eq!(app.deck.slides.len(), 1);
+        assert_eq!(app.deck.slides[0].name, "single.md");
+    }
+
+    #[test]
+    fn command_path_reports_current_target() {
+        let mut app = App::new(
+            PathBuf::from("/tmp/slides"),
+            sample_deck(),
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+        );
+
+        let mut stdout = CrosstermBackend::new(io::stdout());
+        let should_quit = app
+            .execute_command("path", &mut stdout)
+            .expect("execute command");
+
+        assert!(!should_quit);
+        assert_eq!(app.status, "/tmp/slides");
     }
 
     #[test]

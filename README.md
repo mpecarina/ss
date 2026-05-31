@@ -97,7 +97,15 @@ That prevents images from leaking over other tmux windows.
 - `n`, `N`: next / previous hit in current slide search
 - `?`: help overlay
 - `r`: reload slides from disk
+- `:`: command prompt
 - `q`: quit
+
+Command prompt:
+
+- `:open <path>` or `:e <path>`: load a different slide directory or a single markdown file
+- `:path` or `:p`: show the current loaded path
+- `:reload`: reload the current target
+- `:quit`: quit
 
 ## Development
 
