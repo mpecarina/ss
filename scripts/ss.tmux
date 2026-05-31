@@ -98,18 +98,7 @@ if [[ "${LAUNCH_MODE}" == "window" ]]; then
 fi
 
 if [[ "${LAUNCH_MODE}" == "popup" ]]; then
-  POPUP_X='#{popup_centre_x}'
-  POPUP_Y='#{popup_centre_y}'
-  tmux display-popup \
-    -E \
-    -w 90% \
-    -h 85% \
-    -x "${POPUP_X}" \
-    -y "${POPUP_Y}" \
-    -e "SS_TMUX_POPUP=1" \
-    -e 'SS_TMUX_POPUP_X=#{popup_centre_x}' \
-    -e 'SS_TMUX_POPUP_Y=#{popup_centre_y}' \
-    -- "${CMD[@]}"
+  tmux display-popup -E -w 90% -h 85% -- "${CMD[@]}"
   exit 0
 fi
 
