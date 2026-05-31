@@ -1509,6 +1509,10 @@ fn command_completion_request(command: &str, cwd: &Path) -> Option<CommandComple
     })
 }
 
+fn complete_open_command(command: &str, cwd: &Path) -> Option<String> {
+    command_completion_request(command, cwd).map(|completion| completion.matches[0].clone())
+}
+
 fn parse_open_command(command: &str) -> Option<(&str, &str)> {
     if command == "open" {
         return Some(("open ", ""));
@@ -1597,33 +1601,44 @@ fn completion_parts(raw_path: &str, cwd: &Path) -> (String, String, PathBuf) {
         return (String::new(), String::new(), cwd.to_path_buf());
     }
 
-    let expanded = expand_tilde(raw_path);
-    let expanded_text = expanded.to_string_lossy().to_string();
     let has_trailing_slash = raw_path.ends_with('/');
-    let path = Path::new(&expanded_text);
-    let parent = if has_trailing_slash {
-        Some(path)
+    let raw_path_ref = Path::new(raw_path);
+    let raw_parent = if has_trailing_slash {
+        Some(raw_path_ref)
     } else {
-        path.parent()
+        raw_path_ref
+            .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
     };
-    let display_parent = parent
+    let display_parent = raw_parent
         .map(|parent| parent.to_string_lossy().trim_end_matches('/').to_string())
         .unwrap_or_default();
+
     let file_prefix = if has_trailing_slash {
         String::new()
     } else {
-        path.file_name()
+        raw_path_ref
+            .file_name()
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_default()
     };
-    let search_dir = if path.is_absolute() {
-        parent
+
+    let expanded = expand_tilde(raw_path);
+    let expanded_parent = if has_trailing_slash {
+        Some(expanded.as_path())
+    } else {
+        expanded
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+    };
+    let search_dir = if expanded.is_absolute() {
+        expanded_parent
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("/"))
     } else {
-        cwd.join(parent.unwrap_or_else(|| Path::new(".")))
+        cwd.join(expanded_parent.unwrap_or_else(|| Path::new(".")))
     };
+
     (display_parent, file_prefix, search_dir)
 }
 
@@ -2580,6 +2595,23 @@ mod tests {
 
         assert!(!should_quit);
         assert_eq!(app.deck.slides[0].title, "One");
+    }
+
+    #[test]
+    fn tab_completion_keeps_explicit_absolute_path_anchor() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().join("root");
+        let deck_dir = root.join("deck-alpha");
+        fs::create_dir_all(&deck_dir).expect("create deck dir");
+        fs::create_dir_all(temp.path().join("cwd-only")).expect("create cwd-only dir");
+
+        let command = format!("open {}/de", root.display());
+        let completed = complete_open_command(&command, temp.path());
+
+        assert_eq!(
+            completed.as_deref(),
+            Some(format!("open {}/deck-alpha/", root.display()).as_str())
+        );
     }
 
     #[test]
