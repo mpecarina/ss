@@ -34,6 +34,15 @@ pub struct LayoutLine {
     pub spans: Vec<Span<'static>>,
     pub search_text: String,
     pub text_span_index: usize,
+    pub link_urls: Vec<String>,
+    pub link_regions: Vec<LinkRegion>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LinkRegion {
+    pub start_col: usize,
+    pub end_col: usize,
+    pub url: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,6 +66,7 @@ pub struct LaidOutImage {
 struct StyledChunk {
     text: String,
     style: Style,
+    link_url: Option<String>,
 }
 
 impl StyledChunk {
@@ -147,6 +157,8 @@ pub fn build_layout(slide: &Slide, viewport: Viewport) -> SlideLayout {
                     )],
                     search_text: String::new(),
                     text_span_index: 0,
+                    link_urls: Vec::new(),
+                    link_regions: Vec::new(),
                 });
                 searchable_text.push('\n');
                 row += 1;
@@ -292,6 +304,8 @@ fn push_heading_block(
             spans: vec![Span::styled(accent, Style::default().fg(Color::DarkGray))],
             search_text: String::new(),
             text_span_index: 0,
+            link_urls: Vec::new(),
+            link_regions: Vec::new(),
         });
         searchable_text.push('\n');
         *row += 1;
@@ -318,6 +332,8 @@ fn push_heading_block(
             )],
             search_text: String::new(),
             text_span_index: 0,
+            link_urls: Vec::new(),
+            link_regions: Vec::new(),
         });
         searchable_text.push('\n');
         *row += 1;
@@ -366,6 +382,8 @@ fn push_quote_block(
         )],
         search_text: String::new(),
         text_span_index: 0,
+        link_urls: Vec::new(),
+        link_regions: Vec::new(),
     });
     searchable_text.push('\n');
     *row += 1;
@@ -378,6 +396,8 @@ fn push_quote_block(
         )],
         search_text: String::new(),
         text_span_index: 0,
+        link_urls: Vec::new(),
+        link_regions: Vec::new(),
     });
     searchable_text.push('\n');
     *row += 1;
@@ -437,6 +457,8 @@ fn push_code_block(
         )],
         search_text: String::new(),
         text_span_index: 0,
+        link_urls: Vec::new(),
+        link_regions: Vec::new(),
     });
     searchable_text.push('\n');
     *row += 1;
@@ -462,6 +484,8 @@ fn push_code_block(
             spans,
             search_text: raw_line.to_string(),
             text_span_index: 1,
+            link_urls: Vec::new(),
+            link_regions: Vec::new(),
         });
         searchable_text.push_str(raw_line);
         searchable_text.push('\n');
@@ -476,6 +500,8 @@ fn push_code_block(
         )],
         search_text: String::new(),
         text_span_index: 0,
+        link_urls: Vec::new(),
+        link_regions: Vec::new(),
     });
     searchable_text.push('\n');
     *row += 1;
@@ -513,6 +539,8 @@ fn push_table_block(
         spans: vec![Span::styled(border, Style::default().fg(Color::DarkGray))],
         search_text: String::new(),
         text_span_index: 0,
+        link_urls: Vec::new(),
+        link_regions: Vec::new(),
     });
     searchable_text.push('\n');
     *row += 1;
@@ -533,6 +561,8 @@ fn push_table_block(
             )],
             search_text: table_row.join(" "),
             text_span_index: 0,
+            link_urls: Vec::new(),
+            link_regions: Vec::new(),
         });
         searchable_text.push_str(&table_row.join(" "));
         searchable_text.push('\n');
@@ -546,6 +576,8 @@ fn push_table_block(
                 )],
                 search_text: String::new(),
                 text_span_index: 0,
+                link_urls: Vec::new(),
+                link_regions: Vec::new(),
             });
             searchable_text.push('\n');
             *row += 1;
@@ -560,6 +592,8 @@ fn push_table_block(
         )],
         search_text: String::new(),
         text_span_index: 0,
+        link_urls: Vec::new(),
+        link_regions: Vec::new(),
     });
     searchable_text.push('\n');
     *row += 1;
@@ -700,6 +734,28 @@ fn push_rich_inline_lines(
             .iter()
             .map(|chunk| chunk.text.as_str())
             .collect::<String>();
+        let mut link_urls = Vec::new();
+        let mut link_regions = Vec::new();
+        let mut current_col = if prefix_text.is_empty() {
+            0
+        } else {
+            prefix_text.chars().count()
+        };
+        for url in wrapped_line
+            .iter()
+            .filter_map(|chunk| chunk.link_url.as_ref())
+        {
+            if !link_urls.iter().any(|existing| existing == url) {
+                link_urls.push(url.clone());
+            }
+        }
+        for chunk in &wrapped_line {
+            let width = chunk.width();
+            if let Some(url) = &chunk.link_url {
+                push_link_region(&mut link_regions, current_col, current_col + width, url);
+            }
+            current_col += width;
+        }
         for chunk in wrapped_line {
             spans.push(Span::styled(chunk.text, chunk.style));
         }
@@ -708,11 +764,32 @@ fn push_rich_inline_lines(
             spans,
             search_text: search_text.clone(),
             text_span_index,
+            link_urls,
+            link_regions,
         });
         searchable_text.push_str(&search_text);
         searchable_text.push('\n');
         *row += 1;
     }
+}
+
+fn push_link_region(regions: &mut Vec<LinkRegion>, start_col: usize, end_col: usize, url: &str) {
+    if start_col >= end_col {
+        return;
+    }
+
+    if let Some(last) = regions.last_mut() {
+        if last.url == url && last.end_col == start_col {
+            last.end_col = end_col;
+            return;
+        }
+    }
+
+    regions.push(LinkRegion {
+        start_col,
+        end_col,
+        url: url.to_string(),
+    });
 }
 
 fn styled_chunks(inlines: &[Inline], base_style: Style) -> Vec<StyledChunk> {
@@ -722,31 +799,37 @@ fn styled_chunks(inlines: &[Inline], base_style: Style) -> Vec<StyledChunk> {
             Inline::Text(text) => chunks.push(StyledChunk {
                 text: text.clone(),
                 style: base_style,
+                link_url: None,
             }),
             Inline::Emphasis(text) => chunks.push(StyledChunk {
                 text: text.clone(),
                 style: base_style
                     .fg(Color::LightYellow)
                     .add_modifier(Modifier::ITALIC),
+                link_url: None,
             }),
             Inline::Strong(text) => chunks.push(StyledChunk {
                 text: text.clone(),
                 style: base_style.fg(Color::White).add_modifier(Modifier::BOLD),
+                link_url: None,
             }),
             Inline::Code(text) => chunks.push(StyledChunk {
                 text: format!(" {} ", text),
                 style: base_style.fg(Color::Cyan).bg(Color::DarkGray),
+                link_url: None,
             }),
-            Inline::Link { text, .. } => {
+            Inline::Link { text, url } => {
                 chunks.push(StyledChunk {
                     text: text.clone(),
                     style: base_style
                         .fg(Color::Blue)
                         .add_modifier(Modifier::UNDERLINED),
+                    link_url: Some(url.clone()),
                 });
                 chunks.push(StyledChunk {
                     text: " ↗".to_string(),
                     style: base_style.fg(Color::Blue),
+                    link_url: Some(url.clone()),
                 });
             }
         }
@@ -755,6 +838,7 @@ fn styled_chunks(inlines: &[Inline], base_style: Style) -> Vec<StyledChunk> {
         chunks.push(StyledChunk {
             text: String::new(),
             style: base_style,
+            link_url: None,
         });
     }
     chunks
@@ -786,6 +870,7 @@ fn wrap_chunks(chunks: &[StyledChunk], width: usize) -> Vec<Vec<StyledChunk>> {
         lines.push(vec![StyledChunk {
             text: String::new(),
             style: Style::default(),
+            link_url: None,
         }]);
     } else {
         lines.push(finish_wrapped_line(&mut current));
@@ -802,17 +887,20 @@ fn split_chunk_for_wrap(chunk: &StyledChunk) -> Vec<StyledChunk> {
                 out.push(StyledChunk {
                     text: std::mem::take(&mut current),
                     style: chunk.style,
+                    link_url: chunk.link_url.clone(),
                 });
             }
             out.push(StyledChunk {
                 text: "\n".to_string(),
                 style: chunk.style,
+                link_url: chunk.link_url.clone(),
             });
         } else if ch.is_whitespace() {
             current.push(ch);
             out.push(StyledChunk {
                 text: std::mem::take(&mut current),
                 style: chunk.style,
+                link_url: chunk.link_url.clone(),
             });
         } else {
             current.push(ch);
@@ -822,6 +910,7 @@ fn split_chunk_for_wrap(chunk: &StyledChunk) -> Vec<StyledChunk> {
         out.push(StyledChunk {
             text: current,
             style: chunk.style,
+            link_url: chunk.link_url.clone(),
         });
     }
     out
@@ -832,6 +921,7 @@ fn finish_wrapped_line(current: &mut Vec<StyledChunk>) -> Vec<StyledChunk> {
         return vec![StyledChunk {
             text: String::new(),
             style: Style::default(),
+            link_url: None,
         }];
     }
     std::mem::take(current)
@@ -916,6 +1006,8 @@ fn push_blank(row: &mut usize, lines: &mut Vec<LayoutLine>, searchable_text: &mu
         spans: vec![Span::raw(String::new())],
         search_text: String::new(),
         text_span_index: 0,
+        link_urls: Vec::new(),
+        link_regions: Vec::new(),
     });
     searchable_text.push('\n');
     *row += 1;
@@ -951,5 +1043,36 @@ mod tests {
             },
         );
         assert!(!layout.lines.is_empty());
+    }
+
+    #[test]
+    fn preserves_link_targets_on_rendered_lines() {
+        let slide = Slide {
+            blocks: vec![Block::Paragraph(ParagraphBlock {
+                id: 0,
+                content: vec![Inline::Link {
+                    text: "example".to_string(),
+                    url: "https://example.com".to_string(),
+                }],
+            })],
+            ..Slide::default()
+        };
+        let layout = build_layout(
+            &slide,
+            Viewport {
+                width: 40,
+                height: 10,
+            },
+        );
+        let line = layout
+            .lines
+            .iter()
+            .find(|line| !line.link_urls.is_empty())
+            .expect("expected rendered link line");
+        assert_eq!(line.link_urls, vec!["https://example.com".to_string()]);
+        assert_eq!(line.link_regions.len(), 1);
+        assert_eq!(line.link_regions[0].start_col, 0);
+        assert_eq!(line.link_regions[0].end_col, 9);
+        assert_eq!(line.link_regions[0].url, "https://example.com");
     }
 }

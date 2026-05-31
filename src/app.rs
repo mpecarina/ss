@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::{self, Stdout, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -294,6 +295,7 @@ impl App {
                 Line::from("ss help"),
                 Line::from(""),
                 Line::from("Navigation: arrows, h j k l, g/G, ctrl-u, ctrl-d, r, q"),
+                Line::from("Links: move to a linked line and press enter to open it"),
                 Line::from("Search: / current slide, n/N next or previous hit"),
                 Line::from("Outline: o, / filter, enter open"),
                 Line::from("Visuals: presentation mode stays active during search and overlays"),
@@ -546,6 +548,7 @@ impl App {
                         self.outline = false;
                         self.reset_after_slide_change();
                     }
+                } else if key.code == KeyCode::Enter && self.follow_active_link()? {
                 } else {
                     self.next_slide();
                 }
@@ -892,6 +895,74 @@ impl App {
         &self.deck.slides[self.current]
     }
 
+    fn active_line_links(&mut self) -> Vec<String> {
+        let Some(row) = self.active_row() else {
+            return Vec::new();
+        };
+        let width = self
+            .text_rect
+            .map(|rect| content_width(rect.width))
+            .unwrap_or(80);
+        self.layout_for_current(width)
+            .lines
+            .iter()
+            .find(|line| line.row == row)
+            .map(|line| line.link_urls.clone())
+            .unwrap_or_default()
+    }
+
+    fn link_at_screen_position(&mut self, column: u16, row: u16) -> Option<String> {
+        let text_rect = self.text_rect?;
+        if row < text_rect.y
+            || row >= text_rect.y.saturating_add(text_rect.height)
+            || column < text_rect.x
+            || column >= text_rect.x.saturating_add(text_rect.width)
+        {
+            return None;
+        }
+
+        let layout_row = self
+            .text_scroll
+            .saturating_add((row.saturating_sub(text_rect.y)) as usize);
+        let relative_col = column.saturating_sub(text_rect.x) as usize;
+        if relative_col < LINE_GUTTER_WIDTH as usize {
+            return None;
+        }
+        let content_col = relative_col - LINE_GUTTER_WIDTH as usize;
+        let width = content_width(text_rect.width);
+
+        self.layout_for_current(width)
+            .lines
+            .iter()
+            .find(|line| line.row == layout_row)
+            .and_then(|line| {
+                line.link_regions
+                    .iter()
+                    .find(|region| content_col >= region.start_col && content_col < region.end_col)
+                    .map(|region| region.url.clone())
+            })
+    }
+
+    fn follow_active_link(&mut self) -> Result<bool> {
+        let links = self.active_line_links();
+        let Some(url) = links.first() else {
+            return Ok(false);
+        };
+        let slide_path = self.current_slide().path.clone();
+        let target = resolve_link_target(&slide_path, url);
+        open_link_target(&target)?;
+        self.status = if links.len() > 1 {
+            format!(
+                "opened {} (first of {} links on line)",
+                target.display(),
+                links.len()
+            )
+        } else {
+            format!("opened {}", target.display())
+        };
+        Ok(true)
+    }
+
     fn visual_active(&self) -> bool {
         self.visual_anchor.is_some()
     }
@@ -1080,6 +1151,97 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
 
 fn content_width(width: u16) -> u16 {
     width.saturating_sub(LINE_GUTTER_WIDTH)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LinkTarget {
+    External(String),
+    File(PathBuf),
+}
+
+impl LinkTarget {
+    fn display(&self) -> String {
+        match self {
+            Self::External(url) => url.clone(),
+            Self::File(path) => path.display().to_string(),
+        }
+    }
+}
+
+fn resolve_link_target(slide_path: &Path, url: &str) -> LinkTarget {
+    if is_external_link(url) {
+        return LinkTarget::External(url.to_string());
+    }
+
+    let relative = url.split('#').next().unwrap_or(url);
+    let base = slide_path.parent().unwrap_or_else(|| Path::new("."));
+    let path = if relative.is_empty() {
+        slide_path.to_path_buf()
+    } else {
+        let raw = Path::new(relative);
+        if raw.is_absolute() {
+            raw.to_path_buf()
+        } else {
+            base.join(raw)
+        }
+    };
+
+    LinkTarget::File(std::fs::canonicalize(&path).unwrap_or(path))
+}
+
+fn is_external_link(url: &str) -> bool {
+    url.contains("://")
+        || url.starts_with("mailto:")
+        || url.starts_with("file:")
+        || url.starts_with("www.")
+}
+
+fn open_link_target(target: &LinkTarget) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = Command::new("open");
+        match target {
+            LinkTarget::External(url) => {
+                cmd.arg(url);
+            }
+            LinkTarget::File(path) => {
+                cmd.arg(path);
+            }
+        }
+        cmd.spawn()?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut cmd = Command::new("cmd");
+        cmd.arg("/C").arg("start").arg("");
+        match target {
+            LinkTarget::External(url) => {
+                cmd.arg(url);
+            }
+            LinkTarget::File(path) => {
+                cmd.arg(path);
+            }
+        }
+        cmd.spawn()?;
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let mut cmd = Command::new("xdg-open");
+        match target {
+            LinkTarget::External(url) => {
+                cmd.arg(url);
+            }
+            LinkTarget::File(path) => {
+                cmd.arg(path);
+            }
+        }
+        cmd.spawn()?;
+        return Ok(());
+    }
 }
 
 fn diagnostics_enabled() -> bool {
@@ -1321,5 +1483,62 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn resolve_link_target_handles_relative_markdown_links() {
+        let slide_path = PathBuf::from("slides/01_intro.md");
+        let target = resolve_link_target(&slide_path, "./docs/reference.md#api");
+        assert_eq!(
+            target,
+            LinkTarget::File(PathBuf::from("slides").join("docs/reference.md"))
+        );
+    }
+
+    #[test]
+    fn resolve_link_target_preserves_external_urls() {
+        let slide_path = PathBuf::from("slides/01_intro.md");
+        let target = resolve_link_target(&slide_path, "https://example.com/docs");
+        assert_eq!(
+            target,
+            LinkTarget::External("https://example.com/docs".to_string())
+        );
+    }
+
+    #[test]
+    fn link_at_screen_position_hits_clickable_link_text() {
+        let deck = Deck {
+            root: PathBuf::from("."),
+            metadata: DeckMetadata {
+                title: "deck".to_string(),
+            },
+            slides: vec![Slide {
+                id: 0,
+                title: "title".to_string(),
+                name: "00.md".to_string(),
+                blocks: vec![Block::Paragraph(ParagraphBlock {
+                    id: 0,
+                    content: vec![crate::deck::model::Inline::Link {
+                        text: "example".to_string(),
+                        url: "https://example.com".to_string(),
+                    }],
+                })],
+                ..Slide::default()
+            }],
+        };
+        let mut app = App::new(
+            PathBuf::from("."),
+            deck,
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+        );
+        app.body_rows = 4;
+        app.text_rect = Some(Rect::new(10, 5, 30, 4));
+
+        assert_eq!(
+            app.link_at_screen_position(12, 5),
+            Some("https://example.com".to_string())
+        );
+        assert_eq!(app.link_at_screen_position(10, 5), None);
     }
 }
