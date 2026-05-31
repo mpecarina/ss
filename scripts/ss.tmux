@@ -90,9 +90,6 @@ CMD=(
   "${PANE_PATH}"
 )
 
-CMD_STR=""
-printf -v CMD_STR '%q ' "${CMD[@]}"
-
 if [[ "${LAUNCH_MODE}" == "window" ]]; then
   focus_existing_viewer
   NEW_PANE_ID="$(tmux new-window -P -F '#{pane_id}|#{window_id}' -n 'ss' -- "${CMD[@]}")"
@@ -101,10 +98,11 @@ if [[ "${LAUNCH_MODE}" == "window" ]]; then
 fi
 
 if [[ "${LAUNCH_MODE}" == "popup" ]]; then
-  # Popup mode is more reliable with a minimal POSIX shell than a user login shell.
-  tmux display-popup -E -d "${PANE_PATH}" -w 90% -h 85% -- /bin/sh -lc "exec ${CMD_STR}"
+  tmux display-popup -E -w 90% -h 85% -- "${CMD[@]}"
   exit 0
 fi
 
+CMD_STR=""
+printf -v CMD_STR '%q ' "${CMD[@]}"
 tmux set-option -pt "${PANE_ID}" @ss_role "${VIEWER_MARKER}"
 tmux respawn-pane -k -t "${PANE_ID}" -c "${PANE_PATH}" -- "${SHELL_BIN}" -lc "${CMD_STR}; tmux set-option -pt \"${PANE_ID}\" @ss_role ''; exec \"${SHELL_BIN}\" -l"
