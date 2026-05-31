@@ -118,7 +118,12 @@ pub enum Inline {
     Emphasis(String),
     Strong(String),
     Code(String),
-    Link { text: String, url: String },
+    Hint(String),
+    Link {
+        text: String,
+        url: String,
+        title: Option<String>,
+    },
 }
 
 impl Default for Inline {

@@ -16,7 +16,8 @@ pub struct SlideDocument {
 }
 
 pub fn parse_slide(content: &str, dir: &Path, _slide_id: usize) -> Result<SlideDocument> {
-    let parser = Parser::new_ext(content, Options::all());
+    let content = rewrite_ss_hints(content);
+    let parser = Parser::new_ext(&content, Options::all());
     let mut state = ParseState::default();
 
     for event in parser {
@@ -59,7 +60,7 @@ struct ParseState {
     in_list: bool,
     in_table: bool,
     in_table_cell: bool,
-    active_link: Option<String>,
+    active_link: Option<(String, Option<String>)>,
     active_image: Option<(usize, String, Option<String>)>,
     emphasis_depth: usize,
     strong_depth: usize,
@@ -108,8 +109,17 @@ impl ParseState {
                 };
                 self.code_text.clear();
             }
-            Tag::Link { dest_url, .. } => {
-                self.active_link = Some(dest_url.to_string());
+            Tag::Link {
+                dest_url, title, ..
+            } => {
+                self.active_link = Some((
+                    dest_url.to_string(),
+                    if title.is_empty() {
+                        None
+                    } else {
+                        Some(title.to_string())
+                    },
+                ));
             }
             Tag::Emphasis => {
                 self.emphasis_depth += 1;
@@ -246,10 +256,15 @@ impl ParseState {
             self.code_text.push_str(&text);
             return;
         }
-        self.push_inline(if let Some(url) = &self.active_link {
-            Inline::Link {
-                text,
-                url: url.clone(),
+        self.push_inline(if let Some((url, title)) = &self.active_link {
+            if let Some(hint) = text.strip_prefix("ss-hint:") {
+                Inline::Hint(hint.trim().to_string())
+            } else {
+                Inline::Link {
+                    text,
+                    url: url.clone(),
+                    title: title.clone(),
+                }
             }
         } else if self.strong_depth > 0 {
             Inline::Strong(text)
@@ -309,6 +324,7 @@ fn flatten_inline(inlines: &[Inline]) -> String {
     for inline in inlines {
         match inline {
             Inline::Text(text)
+            | Inline::Hint(text)
             | Inline::Emphasis(text)
             | Inline::Strong(text)
             | Inline::Code(text) => out.push_str(text),
@@ -316,6 +332,31 @@ fn flatten_inline(inlines: &[Inline]) -> String {
         }
     }
     out.trim().to_string()
+}
+
+fn rewrite_ss_hints(content: &str) -> String {
+    let mut out = String::new();
+    let mut rest = content;
+
+    while let Some(start) = rest.find("{{{") {
+        out.push_str(&rest[..start]);
+        let after_start = &rest[start + 3..];
+        let Some(end) = after_start.find("}}}") else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+
+        let body = after_start[..end].trim();
+        if let Some(hint) = body.strip_prefix("ss:") {
+            out.push_str(&format!("[ss-hint:{}](#ss-hint)", hint.trim()));
+        } else {
+            out.push_str(&rest[start..start + 3 + end + 3]);
+        }
+        rest = &after_start[end + 3..];
+    }
+
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -352,6 +393,51 @@ mod tests {
                 .content
                 .iter()
                 .any(|inline| matches!(inline, Inline::Strong(text) if text == "bold"))
+        );
+    }
+
+    #[test]
+    fn parses_link_title_as_hover_hint() {
+        let doc = parse_slide(
+            "[example](https://example.com/docs \"this is a hint\")",
+            Path::new("."),
+            0,
+        )
+        .unwrap();
+        let Block::Paragraph(block) = &doc.blocks[0] else {
+            panic!("expected paragraph block");
+        };
+        assert!(block.content.iter().any(|inline| {
+            matches!(
+                inline,
+                Inline::Link {
+                    text,
+                    url,
+                    title: Some(title),
+                } if text == "example"
+                    && url == "https://example.com/docs"
+                    && title == "this is a hint"
+            )
+        }));
+    }
+
+    #[test]
+    fn parses_ss_hint_marker_as_hidden_inline_hint() {
+        let doc = parse_slide("hello {{{ss: this is a hint}}}", Path::new("."), 0).unwrap();
+        let Block::Paragraph(block) = &doc.blocks[0] else {
+            panic!("expected paragraph block");
+        };
+        assert!(
+            block
+                .content
+                .iter()
+                .any(|inline| matches!(inline, Inline::Text(text) if text == "hello "))
+        );
+        assert!(
+            block
+                .content
+                .iter()
+                .any(|inline| matches!(inline, Inline::Hint(text) if text == "this is a hint"))
         );
     }
 }

@@ -86,6 +86,7 @@ struct StyledChunk {
     text: String,
     style: Style,
     link_url: Option<String>,
+    link_title: Option<String>,
 }
 
 impl StyledChunk {
@@ -341,7 +342,7 @@ fn append_hover_hint(spans: &mut Vec<Span<'static>>, line: &LayoutLine) {
         Style::default().fg(Color::DarkGray),
     ));
     spans.push(Span::styled(
-        format!(":: {}", hint),
+        hint.to_string(),
         Style::default().fg(Color::Rgb(128, 144, 168)),
     ));
 }
@@ -812,6 +813,7 @@ fn push_rich_inline_lines(
     heading_level: Option<u8>,
 ) {
     let prefix_text = prefix.unwrap_or("");
+    let hint_text = inline_hint_text(inlines);
     let chunks = styled_chunks(inlines, base_style);
     let wrapped = wrap_chunks(&chunks, wrap_width.max(1));
     for (index, wrapped_line) in wrapped.into_iter().enumerate() {
@@ -854,7 +856,9 @@ fn push_rich_inline_lines(
             }
             current_col += width;
         }
-        let hover_hint = hover_hint_for_urls(&link_urls);
+        let hover_hint = hint_text
+            .clone()
+            .or_else(|| hover_hint_for_chunks(&wrapped_line, &link_urls));
         for chunk in wrapped_line {
             spans.push(Span::styled(chunk.text, chunk.style));
         }
@@ -901,36 +905,43 @@ fn styled_chunks(inlines: &[Inline], base_style: Style) -> Vec<StyledChunk> {
                 text: text.clone(),
                 style: base_style,
                 link_url: None,
+                link_title: None,
             }),
+            Inline::Hint(_) => {}
             Inline::Emphasis(text) => chunks.push(StyledChunk {
                 text: text.clone(),
                 style: base_style
                     .fg(Color::LightYellow)
                     .add_modifier(Modifier::ITALIC),
                 link_url: None,
+                link_title: None,
             }),
             Inline::Strong(text) => chunks.push(StyledChunk {
                 text: text.clone(),
                 style: base_style.fg(Color::White).add_modifier(Modifier::BOLD),
                 link_url: None,
+                link_title: None,
             }),
             Inline::Code(text) => chunks.push(StyledChunk {
                 text: format!(" {} ", text),
                 style: base_style.fg(Color::Cyan).bg(Color::DarkGray),
                 link_url: None,
+                link_title: None,
             }),
-            Inline::Link { text, url } => {
+            Inline::Link { text, url, title } => {
                 chunks.push(StyledChunk {
                     text: text.clone(),
                     style: base_style
                         .fg(Color::Blue)
                         .add_modifier(Modifier::UNDERLINED),
                     link_url: Some(url.clone()),
+                    link_title: title.clone(),
                 });
                 chunks.push(StyledChunk {
                     text: " ↗".to_string(),
                     style: base_style.fg(Color::Blue),
                     link_url: Some(url.clone()),
+                    link_title: title.clone(),
                 });
             }
         }
@@ -940,9 +951,27 @@ fn styled_chunks(inlines: &[Inline], base_style: Style) -> Vec<StyledChunk> {
             text: String::new(),
             style: base_style,
             link_url: None,
+            link_title: None,
         });
     }
     chunks
+}
+
+fn inline_hint_text(inlines: &[Inline]) -> Option<String> {
+    let mut hints = Vec::new();
+    for inline in inlines {
+        if let Inline::Hint(text) = inline {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                hints.push(trimmed.to_string());
+            }
+        }
+    }
+    if hints.is_empty() {
+        None
+    } else {
+        Some(hints.join("  "))
+    }
 }
 
 fn wrap_chunks(chunks: &[StyledChunk], width: usize) -> Vec<Vec<StyledChunk>> {
@@ -972,6 +1001,7 @@ fn wrap_chunks(chunks: &[StyledChunk], width: usize) -> Vec<Vec<StyledChunk>> {
             text: String::new(),
             style: Style::default(),
             link_url: None,
+            link_title: None,
         }]);
     } else {
         lines.push(finish_wrapped_line(&mut current));
@@ -989,12 +1019,14 @@ fn split_chunk_for_wrap(chunk: &StyledChunk) -> Vec<StyledChunk> {
                     text: std::mem::take(&mut current),
                     style: chunk.style,
                     link_url: chunk.link_url.clone(),
+                    link_title: chunk.link_title.clone(),
                 });
             }
             out.push(StyledChunk {
                 text: "\n".to_string(),
                 style: chunk.style,
                 link_url: chunk.link_url.clone(),
+                link_title: chunk.link_title.clone(),
             });
         } else if ch.is_whitespace() {
             current.push(ch);
@@ -1002,6 +1034,7 @@ fn split_chunk_for_wrap(chunk: &StyledChunk) -> Vec<StyledChunk> {
                 text: std::mem::take(&mut current),
                 style: chunk.style,
                 link_url: chunk.link_url.clone(),
+                link_title: chunk.link_title.clone(),
             });
         } else {
             current.push(ch);
@@ -1012,6 +1045,7 @@ fn split_chunk_for_wrap(chunk: &StyledChunk) -> Vec<StyledChunk> {
             text: current,
             style: chunk.style,
             link_url: chunk.link_url.clone(),
+            link_title: chunk.link_title.clone(),
         });
     }
     out
@@ -1023,6 +1057,7 @@ fn finish_wrapped_line(current: &mut Vec<StyledChunk>) -> Vec<StyledChunk> {
             text: String::new(),
             style: Style::default(),
             link_url: None,
+            link_title: None,
         }];
     }
     std::mem::take(current)
@@ -1075,6 +1110,7 @@ fn flatten_inline(inlines: &[Inline]) -> String {
     for inline in inlines {
         match inline {
             Inline::Text(text)
+            | Inline::Hint(text)
             | Inline::Emphasis(text)
             | Inline::Strong(text)
             | Inline::Code(text) => out.push_str(text),
@@ -1182,7 +1218,20 @@ fn push_blank(row: &mut usize, lines: &mut Vec<LayoutLine>, searchable_text: &mu
     *row += 1;
 }
 
-fn hover_hint_for_urls(link_urls: &[String]) -> Option<String> {
+fn hover_hint_for_chunks(chunks: &[StyledChunk], link_urls: &[String]) -> Option<String> {
+    let title = chunks
+        .iter()
+        .filter_map(|chunk| chunk.link_title.as_deref())
+        .map(str::trim)
+        .find(|title| !title.is_empty());
+    if let Some(title) = title {
+        let mut hint = title.to_string();
+        if link_urls.len() > 1 {
+            hint.push_str(&format!(" (+{} more)", link_urls.len() - 1));
+        }
+        return Some(hint);
+    }
+
     let first = link_urls.first()?.trim();
     if first.is_empty() {
         return None;
@@ -1237,6 +1286,7 @@ mod tests {
                 content: vec![Inline::Link {
                     text: "example".to_string(),
                     url: "https://example.com".to_string(),
+                    title: None,
                 }],
             })],
             ..Slide::default()
@@ -1272,6 +1322,7 @@ mod tests {
                 content: vec![Inline::Link {
                     text: "example".to_string(),
                     url: "https://example.com/docs".to_string(),
+                    title: None,
                 }],
             })],
             ..Slide::default()
@@ -1313,6 +1364,7 @@ mod tests {
                     content: vec![Inline::Link {
                         text: "first".to_string(),
                         url: "https://example.com/first".to_string(),
+                        title: None,
                     }],
                 }),
                 Block::Paragraph(ParagraphBlock {
@@ -1320,6 +1372,7 @@ mod tests {
                     content: vec![Inline::Link {
                         text: "second".to_string(),
                         url: "https://example.com/second".to_string(),
+                        title: None,
                     }],
                 }),
             ],
@@ -1349,6 +1402,88 @@ mod tests {
                 .spans
                 .iter()
                 .any(|span| span.content.contains("https://example.com/second"))
+        );
+    }
+
+    #[test]
+    fn hover_hint_prefers_markdown_link_title() {
+        let slide = Slide {
+            blocks: vec![Block::Paragraph(ParagraphBlock {
+                id: 0,
+                content: vec![Inline::Link {
+                    text: "example".to_string(),
+                    url: "https://example.com/docs".to_string(),
+                    title: Some("this is a hint".to_string()),
+                }],
+            })],
+            ..Slide::default()
+        };
+        let layout = build_layout(
+            &slide,
+            Viewport {
+                width: 60,
+                height: 10,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                unicode_placeholders: false,
+            },
+        );
+
+        let visible = viewport_lines(&layout, 0, 4, &[], None, Some(0), Some((0, 0)), true);
+
+        assert!(
+            visible[0]
+                .spans
+                .iter()
+                .any(|span| span.content.contains("this is a hint"))
+        );
+        assert!(
+            !visible[0]
+                .spans
+                .iter()
+                .any(|span| span.content.contains("https://example.com/docs"))
+        );
+    }
+
+    #[test]
+    fn ss_inline_hint_stays_hidden_until_visual_hover() {
+        let slide = Slide {
+            blocks: vec![Block::Paragraph(ParagraphBlock {
+                id: 0,
+                content: vec![
+                    Inline::Text("primary text ".to_string()),
+                    Inline::Hint("this is a hint".to_string()),
+                ],
+            })],
+            ..Slide::default()
+        };
+        let layout = build_layout(
+            &slide,
+            Viewport {
+                width: 60,
+                height: 10,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                unicode_placeholders: false,
+            },
+        );
+
+        assert_eq!(layout.lines[0].search_text, "primary text ");
+
+        let hidden = viewport_lines(&layout, 0, 4, &[], None, Some(0), Some((0, 0)), false);
+        let visible = viewport_lines(&layout, 0, 4, &[], None, Some(0), Some((0, 0)), true);
+
+        assert!(
+            hidden[0]
+                .spans
+                .iter()
+                .all(|span| !span.content.contains("this is a hint"))
+        );
+        assert!(
+            visible[0]
+                .spans
+                .iter()
+                .any(|span| span.content.contains("this is a hint"))
         );
     }
 

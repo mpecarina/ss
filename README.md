@@ -10,6 +10,7 @@ make build
 ./bin/ss --watch .
 ./bin/ss -w .
 ./bin/ss --visual-hover-hints .
+./bin/ss --no-visual-hover-hints .
 ```
 
 Run directly:
@@ -65,6 +66,7 @@ binary is missing or the git commit changed
 - natural filename sorting (`00_`, `01_`, `10_`, etc.)
 - `![](./image.png)` style local image detection
 - `[text](url)` style markdown links can be opened from the active line
+- `{{{ss: this is a hint}}}` attaches hidden inline hint text to the current rendered line
 - kitty/ghostty image drawing with tmux passthrough wrapping
 - tmux focus polling clears images when the popup is hidden or inactive
 
@@ -95,7 +97,14 @@ Command prompt:
 Live reload:
 
 - `ss --watch <path>` or `ss -w <path>` polls the currently loaded markdown file(s) and reloads when they change
-- `ss --visual-hover-hints <path>` reveals hidden markdown link targets as a trailing inline hint only for the selected row in visual mode
+- visual hover hints are enabled by default and reveal hidden same-line metadata only for the selected row in visual mode
+- `ss --no-visual-hover-hints <path>` disables visual hover hints
+
+Hover hints:
+
+- write `primary text {{{ss: this is a hint}}}` on one markdown line
+- the `{{{ss: ...}}}` marker stays hidden in normal rendering
+- in visual mode, selecting that row reveals `this is a hint` to the right with lower emphasis
 
 ## Development
 

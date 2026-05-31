@@ -33,13 +33,15 @@ const LINE_GUTTER_WIDTH: u16 = 2;
 
 pub fn run() -> Result<()> {
     let mut watch = false;
-    let mut visual_hover_hints = false;
+    let mut visual_hover_hints = true;
     let mut dir = None;
     for arg in std::env::args().skip(1) {
         if arg == "--watch" || arg == "-w" {
             watch = true;
         } else if arg == "--visual-hover-hints" {
             visual_hover_hints = true;
+        } else if arg == "--no-visual-hover-hints" {
+            visual_hover_hints = false;
         } else if dir.is_none() {
             dir = Some(PathBuf::from(arg));
         }
@@ -154,7 +156,7 @@ impl App {
             dir,
             deck,
             watch,
-            visual_hover_hints: false,
+            visual_hover_hints: true,
             watched_paths: Vec::new(),
             watched_mtime: None,
             current: 0,
@@ -358,6 +360,7 @@ impl App {
                 Line::from("Search: / current slide, n/N next or previous hit, [ ] heading jumps"),
                 Line::from("Outline: o, / filter, enter open"),
                 Line::from("Commands: :w or :watch enables live reload for the current target"),
+                Line::from("Visual: link titles render as hover hints on the selected visual row"),
                 Line::from("Visuals: presentation mode stays active during search and overlays"),
                 Line::from("Graphics: explicit image ownership and tmux visibility gating"),
             ]),
@@ -556,6 +559,7 @@ impl App {
                 if self.outline {
                     self.outline_search_focus = true;
                 } else {
+                    self.clear_search();
                     self.search_focus = true;
                     self.update_search_matches();
                 }
@@ -1543,6 +1547,11 @@ fn command_completion_request(command: &str, cwd: &Path) -> Option<CommandComple
     })
 }
 
+fn complete_open_command(command: &str, cwd: &Path) -> Option<String> {
+    command_completion_request(command, cwd)
+        .and_then(|completion| completion.matches.into_iter().next())
+}
+
 fn parse_open_command(command: &str) -> Option<(&str, &str)> {
     if command == "open" {
         return Some(("open ", ""));
@@ -2073,6 +2082,37 @@ mod tests {
     }
 
     #[test]
+    fn slash_starts_search_with_blank_query() {
+        let mut app = App::new(
+            PathBuf::from("."),
+            sample_deck(),
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+            false,
+        );
+        app.search = "term".to_string();
+        app.search_matches.push(SearchMatch {
+            row: 0,
+            start: 0,
+            len: 4,
+        });
+        app.status = "match 1/1 for /term".to_string();
+
+        let should_quit = app
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('/'), crossterm::event::KeyModifiers::NONE),
+                &mut CrosstermBackend::new(io::stdout()),
+            )
+            .expect("handle slash");
+
+        assert!(!should_quit);
+        assert!(app.search_focus);
+        assert!(app.search.is_empty());
+        assert!(app.search_matches.is_empty());
+        assert!(app.status.is_empty());
+    }
+
+    #[test]
     fn ctrl_c_exits_command_before_quitting() {
         let mut app = App::new(
             PathBuf::from("."),
@@ -2244,6 +2284,7 @@ mod tests {
                         crate::deck::model::Inline::Link {
                             text: "example".to_string(),
                             url: "https://example.com".to_string(),
+                            title: None,
                         },
                     ],
                 })],
