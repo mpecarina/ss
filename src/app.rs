@@ -8,8 +8,8 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::Result;
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::window_size;
 use crossterm::terminal::{
@@ -48,7 +48,7 @@ pub fn run() -> Result<()> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, Hide)?;
+    execute!(stdout, EnterAlternateScreen, Hide, EnableBracketedPaste)?;
     let keyboard_enhancement = matches!(
         crossterm::terminal::supports_keyboard_enhancement(),
         Ok(true)
@@ -72,7 +72,13 @@ pub fn run() -> Result<()> {
     if keyboard_enhancement {
         execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags).ok();
     }
-    execute!(terminal.backend_mut(), Show, LeaveAlternateScreen).ok();
+    execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        Show,
+        LeaveAlternateScreen
+    )
+    .ok();
     result
 }
 
@@ -194,6 +200,10 @@ impl App {
                         if self.handle_key(key, terminal.backend_mut())? {
                             break;
                         }
+                        dirty = true;
+                    }
+                    Event::Paste(data) => {
+                        self.handle_paste(data);
                         dirty = true;
                     }
                     Event::Resize(_, _) => dirty = true,
@@ -738,6 +748,22 @@ impl App {
             _ => {}
         }
         Ok(false)
+    }
+
+    fn handle_paste(&mut self, data: String) {
+        if self.command_focus {
+            self.command.push_str(&data);
+            return;
+        }
+        if self.search_focus {
+            self.search.push_str(&data);
+            self.update_search_matches();
+            return;
+        }
+        if self.outline_search_focus {
+            self.outline_query.push_str(&data);
+            self.recompute_outline();
+        }
     }
 
     fn execute_command(
@@ -1849,6 +1875,22 @@ mod tests {
             .expect("handle ctrl-c");
 
         assert!(should_quit);
+    }
+
+    #[test]
+    fn paste_appends_raw_text_to_command_buffer() {
+        let mut app = App::new(
+            PathBuf::from("."),
+            sample_deck(),
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+            false,
+        );
+        app.command_focus = true;
+
+        app.handle_paste("open ./slides".to_string());
+
+        assert_eq!(app.command, "open ./slides");
     }
 
     #[test]
