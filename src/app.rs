@@ -444,6 +444,13 @@ impl App {
         let Some(key) = self.normalize_key_event(key) else {
             return Ok(false);
         };
+        if key.code == KeyCode::Char('c')
+            && key
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL)
+        {
+            return Ok(self.handle_ctrl_c());
+        }
         if self.help || self.search_focus || self.outline_search_focus || self.command_focus {
             match key.code {
                 KeyCode::Left => {
@@ -628,6 +635,42 @@ impl App {
             _ => {}
         }
         Ok(false)
+    }
+
+    fn handle_ctrl_c(&mut self) -> bool {
+        if self.command_focus {
+            self.command_focus = false;
+            self.command.clear();
+            return false;
+        }
+        if self.search_focus {
+            self.search_focus = false;
+            if self.search.is_empty() {
+                self.clear_search();
+            }
+            return false;
+        }
+        if self.outline_search_focus {
+            self.outline_search_focus = false;
+            return false;
+        }
+        if self.help {
+            self.help = false;
+            return false;
+        }
+        if self.outline {
+            self.outline = false;
+            return false;
+        }
+        if !self.search.is_empty() {
+            self.clear_search();
+            return false;
+        }
+        if self.visual_active() {
+            self.clear_visual_mode();
+            return false;
+        }
+        true
     }
 
     fn handle_search_key(&mut self, key: KeyEvent) -> bool {
@@ -1705,6 +1748,107 @@ mod tests {
 
         assert_eq!(app.current, 0);
         assert!(!app.search_focus);
+    }
+
+    #[test]
+    fn ctrl_c_exits_search_before_quitting() {
+        let mut app = App::new(
+            PathBuf::from("."),
+            sample_deck(),
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+            false,
+        );
+        app.search_focus = true;
+        app.search = "term".to_string();
+
+        let should_quit = app
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('c'), crossterm::event::KeyModifiers::CONTROL),
+                &mut CrosstermBackend::new(io::stdout()),
+            )
+            .expect("handle ctrl-c");
+
+        assert!(!should_quit);
+        assert!(!app.search_focus);
+        assert_eq!(app.search, "term");
+    }
+
+    #[test]
+    fn ctrl_c_exits_command_before_quitting() {
+        let mut app = App::new(
+            PathBuf::from("."),
+            sample_deck(),
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+            false,
+        );
+        app.command_focus = true;
+        app.command = "reload".to_string();
+
+        let should_quit = app
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('c'), crossterm::event::KeyModifiers::CONTROL),
+                &mut CrosstermBackend::new(io::stdout()),
+            )
+            .expect("handle ctrl-c");
+
+        assert!(!should_quit);
+        assert!(!app.command_focus);
+        assert!(app.command.is_empty());
+    }
+
+    #[test]
+    fn ctrl_c_exits_overlay_modes_before_quitting() {
+        let mut app = App::new(
+            PathBuf::from("."),
+            sample_deck(),
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+            false,
+        );
+        app.help = true;
+
+        let should_quit = app
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('c'), crossterm::event::KeyModifiers::CONTROL),
+                &mut CrosstermBackend::new(io::stdout()),
+            )
+            .expect("handle ctrl-c");
+
+        assert!(!should_quit);
+        assert!(!app.help);
+
+        app.outline = true;
+        let should_quit = app
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('c'), crossterm::event::KeyModifiers::CONTROL),
+                &mut CrosstermBackend::new(io::stdout()),
+            )
+            .expect("handle ctrl-c");
+
+        assert!(!should_quit);
+        assert!(!app.outline);
+    }
+
+    #[test]
+    fn ctrl_c_quits_at_root_presentation_mode() {
+        let mut app = App::new(
+            PathBuf::from("."),
+            sample_deck(),
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+            false,
+        );
+
+        let should_quit = app
+            .handle_key(
+                KeyEvent::new(KeyCode::Char('c'), crossterm::event::KeyModifiers::CONTROL),
+                &mut CrosstermBackend::new(io::stdout()),
+            )
+            .expect("handle ctrl-c");
+
+        assert!(should_quit);
     }
 
     #[test]
