@@ -7,6 +7,8 @@ tmux-aware markdown slideshow with kitty/ghostty image rendering.
 ```sh
 make build
 ./bin/ss .
+./bin/ss --watch .
+./bin/ss -w .
 ```
 
 Run directly:
@@ -97,10 +99,14 @@ That prevents images from leaking over other tmux windows.
 
 Command prompt:
 
-- `:open <path>` or `:e <path>`: load a different slide directory or a single markdown file
+- `:open <path>`, `:o <path>`, or `:e <path>`: load a different slide directory or a single markdown file
 - `:path` or `:p`: show the current loaded path
-- `:reload`: reload the current target
+- `:reload` or `:r`: reload the current target
 - `:quit`: quit
+
+Live reload:
+
+- `ss --watch <path>` or `ss -w <path>` polls the currently loaded markdown file(s) and reloads when they change
 
 ## Development
 

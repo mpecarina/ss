@@ -1075,5 +1075,4 @@ mod tests {
         assert_eq!(line.link_regions[0].end_col, 9);
         assert_eq!(line.link_regions[0].url, "https://example.com");
     }
-
 }

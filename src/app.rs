@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::fs;
 use std::io::{self, Stdout, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
 use crossterm::cursor::{Hide, Show};
@@ -30,10 +31,16 @@ use crate::tmux::{TmuxRuntime, VisibilityState};
 const LINE_GUTTER_WIDTH: u16 = 2;
 
 pub fn run() -> Result<()> {
-    let dir = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let mut watch = false;
+    let mut dir = None;
+    for arg in std::env::args().skip(1) {
+        if arg == "--watch" || arg == "-w" {
+            watch = true;
+        } else if dir.is_none() {
+            dir = Some(PathBuf::from(arg));
+        }
+    }
+    let dir = dir.unwrap_or_else(|| PathBuf::from("."));
     let deck = load_deck(&dir)?;
     let tmux = TmuxRuntime::detect();
     let backend = detect_backend(&tmux);
@@ -59,7 +66,7 @@ pub fn run() -> Result<()> {
     }
     let backend_term = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend_term)?;
-    let result = App::new(dir, deck, tmux, backend).run(&mut terminal);
+    let result = App::new(dir, deck, tmux, backend, watch).run(&mut terminal);
     disable_raw_mode().ok();
     if keyboard_enhancement {
         execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags).ok();
@@ -71,6 +78,9 @@ pub fn run() -> Result<()> {
 struct App {
     dir: PathBuf,
     deck: Deck,
+    watch: bool,
+    watched_paths: Vec<PathBuf>,
+    watched_mtime: Option<SystemTime>,
     current: usize,
     status: String,
     help: bool,
@@ -117,10 +127,14 @@ impl App {
         deck: Deck,
         tmux: TmuxRuntime,
         image_backend: Box<dyn ImageBackend>,
+        watch: bool,
     ) -> Self {
         let mut app = Self {
             dir,
             deck,
+            watch,
+            watched_paths: Vec::new(),
+            watched_mtime: None,
             current: 0,
             status: String::new(),
             help: false,
@@ -152,6 +166,7 @@ impl App {
             escape_sequence: EscapeSequence::None,
             csi_buffer: String::new(),
         };
+        app.refresh_watch_state();
         app.recompute_outline();
         app
     }
@@ -160,6 +175,9 @@ impl App {
         let mut dirty = true;
         loop {
             if self.poll_visibility(terminal.backend_mut())? {
+                dirty = true;
+            }
+            if self.poll_reload(terminal.backend_mut())? {
                 dirty = true;
             }
             if dirty {
@@ -694,6 +712,7 @@ impl App {
 
         if let Some(path) = trimmed
             .strip_prefix("open ")
+            .or_else(|| trimmed.strip_prefix("o "))
             .or_else(|| trimmed.strip_prefix("e "))
         {
             self.open_path(path.trim(), stdout)?;
@@ -711,6 +730,7 @@ impl App {
         self.current = self.current.min(self.deck.slides.len().saturating_sub(1));
         self.update_search_matches();
         self.recompute_outline();
+        self.refresh_watch_state();
         self.status = format!("reloaded {} slides", self.deck.slides.len());
         Ok(())
     }
@@ -736,8 +756,34 @@ impl App {
         self.search_matches.clear();
         self.search_match_index = 0;
         self.recompute_outline();
+        self.refresh_watch_state();
         self.status = format!("opened {}", self.dir.display());
         Ok(())
+    }
+
+    fn poll_reload(&mut self, stdout: &mut CrosstermBackend<Stdout>) -> Result<bool> {
+        if !self.watch {
+            return Ok(false);
+        }
+
+        let latest = latest_mtime(&self.watched_paths);
+        match (self.watched_mtime, latest) {
+            (Some(previous), Some(current)) if current > previous => {
+                self.reload_current_path(stdout)?;
+                self.status = format!("auto-reloaded {} slides", self.deck.slides.len());
+                Ok(true)
+            }
+            (None, Some(current)) => {
+                self.watched_mtime = Some(current);
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn refresh_watch_state(&mut self) {
+        self.watched_paths = watched_paths(&self.dir, &self.deck);
+        self.watched_mtime = latest_mtime(&self.watched_paths);
     }
 
     fn draw_images(&mut self, stdout: &mut CrosstermBackend<Stdout>) -> Result<()> {
@@ -1002,7 +1048,10 @@ impl App {
     }
 
     fn follow_active_link(&mut self) -> Result<bool> {
-        let Some((url, link_count)) = self.active_row().and_then(|row| self.first_link_on_row(row)) else {
+        let Some((url, link_count)) = self
+            .active_row()
+            .and_then(|row| self.first_link_on_row(row))
+        else {
             return Ok(false);
         };
         self.open_link(&url, link_count)?;
@@ -1018,7 +1067,11 @@ impl App {
             .lines
             .iter()
             .find(|line| line.row == row)
-            .and_then(|line| line.link_urls.first().map(|url| (url.clone(), line.link_urls.len())))
+            .and_then(|line| {
+                line.link_urls
+                    .first()
+                    .map(|url| (url.clone(), line.link_urls.len()))
+            })
     }
 
     fn open_link(&mut self, url: &str, link_count: usize) -> Result<()> {
@@ -1257,6 +1310,29 @@ fn content_width(width: u16) -> u16 {
     width.saturating_sub(LINE_GUTTER_WIDTH)
 }
 
+fn watched_paths(dir: &Path, deck: &Deck) -> Vec<PathBuf> {
+    if deck.slides.len() == 1 && dir.is_file() {
+        return vec![deck.slides[0].path.clone()];
+    }
+
+    let mut paths = deck
+        .slides
+        .iter()
+        .map(|slide| slide.path.clone())
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn latest_mtime(paths: &[PathBuf]) -> Option<SystemTime> {
+    paths.iter().filter_map(path_mtime).max()
+}
+
+fn path_mtime(path: &PathBuf) -> Option<SystemTime> {
+    fs::metadata(path).ok()?.modified().ok()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum LinkTarget {
     External(String),
@@ -1395,6 +1471,7 @@ mod tests {
             sample_deck(),
             TmuxRuntime::default(),
             Box::new(NoopBackend),
+            false,
         );
         app.body_rows = 1;
         app.text_rect = Some(Rect::new(0, 0, 20, 1));
@@ -1417,6 +1494,7 @@ mod tests {
             deck,
             TmuxRuntime::default(),
             Box::new(NoopBackend),
+            false,
         );
         app.body_rows = 1;
         app.text_rect = Some(Rect::new(0, 0, 12, 1));
@@ -1444,6 +1522,7 @@ mod tests {
             sample_deck(),
             TmuxRuntime::default(),
             Box::new(NoopBackend),
+            false,
         );
         app.search = "world".to_string();
         app.search_matches.push(SearchMatch {
@@ -1474,6 +1553,7 @@ mod tests {
             deck,
             TmuxRuntime::default(),
             Box::new(NoopBackend),
+            false,
         );
         app.current = 1;
         app.text_scroll = 7;
@@ -1491,6 +1571,7 @@ mod tests {
             sample_deck(),
             TmuxRuntime::default(),
             Box::new(NoopBackend),
+            false,
         );
         app.text_scroll = 3;
 
@@ -1514,6 +1595,7 @@ mod tests {
             deck,
             TmuxRuntime::default(),
             Box::new(NoopBackend),
+            false,
         );
         app.text_scroll = 5;
 
@@ -1537,6 +1619,7 @@ mod tests {
             deck,
             TmuxRuntime::default(),
             Box::new(NoopBackend),
+            false,
         );
         app.current = 1;
         app.search_focus = true;
@@ -1558,6 +1641,7 @@ mod tests {
             sample_deck(),
             TmuxRuntime::default(),
             Box::new(NoopBackend),
+            false,
         );
 
         let esc = app.normalize_key_event(KeyEvent::new(
@@ -1640,6 +1724,7 @@ mod tests {
             deck,
             TmuxRuntime::default(),
             Box::new(NoopBackend),
+            false,
         );
         app.body_rows = 4;
         app.text_rect = Some(Rect::new(10, 5, 30, 4));
@@ -1656,6 +1741,7 @@ mod tests {
             sample_deck(),
             TmuxRuntime::default(),
             Box::new(NoopBackend),
+            false,
         );
         app.body_rows = 4;
         app.text_rect = Some(Rect::new(10, 5, 30, 4));
@@ -1678,6 +1764,7 @@ mod tests {
             load_deck(&slides_dir).expect("load initial deck"),
             TmuxRuntime::default(),
             Box::new(NoopBackend),
+            false,
         );
 
         let mut stdout = CrosstermBackend::new(io::stdout());
@@ -1700,6 +1787,7 @@ mod tests {
             sample_deck(),
             TmuxRuntime::default(),
             Box::new(NoopBackend),
+            false,
         );
 
         let mut stdout = CrosstermBackend::new(io::stdout());
@@ -1740,6 +1828,7 @@ mod tests {
             deck,
             TmuxRuntime::default(),
             Box::new(NoopBackend),
+            false,
         );
         app.body_rows = 4;
         app.text_rect = Some(Rect::new(0, 0, 40, 4));
@@ -1778,6 +1867,7 @@ mod tests {
             deck,
             TmuxRuntime::default(),
             Box::new(NoopBackend),
+            false,
         );
         app.body_rows = 4;
         app.text_rect = Some(Rect::new(0, 0, 40, 4));
@@ -1787,5 +1877,53 @@ mod tests {
         app.move_visual_cursor(1);
 
         assert_eq!(app.visual_cursor, 2);
+    }
+
+    #[test]
+    fn command_o_alias_loads_new_markdown_target() {
+        let temp = tempdir().expect("tempdir");
+        let slides_dir = temp.path().join("slides");
+        fs::create_dir_all(&slides_dir).expect("create slides dir");
+        fs::write(slides_dir.join("01_one.md"), "# One\n").expect("write first slide");
+        fs::write(temp.path().join("single.md"), "# Single\n").expect("write single slide");
+
+        let mut app = App::new(
+            slides_dir.clone(),
+            load_deck(&slides_dir).expect("load initial deck"),
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+            false,
+        );
+
+        let mut stdout = CrosstermBackend::new(io::stdout());
+        let should_quit = app
+            .execute_command(
+                &format!("o {}", temp.path().join("single.md").display()),
+                &mut stdout,
+            )
+            .expect("execute command");
+
+        assert!(!should_quit);
+        assert_eq!(app.deck.slides.len(), 1);
+        assert_eq!(app.deck.slides[0].name, "single.md");
+    }
+
+    #[test]
+    fn watched_paths_follow_loaded_markdown_files() {
+        let temp = tempdir().expect("tempdir");
+        let slides_dir = temp.path().join("slides");
+        fs::create_dir_all(&slides_dir).expect("create slides dir");
+        fs::write(slides_dir.join("01_one.md"), "# One\n").expect("write first slide");
+        fs::write(slides_dir.join("02_two.md"), "# Two\n").expect("write second slide");
+
+        let deck = load_deck(&slides_dir).expect("load deck");
+        let watched = watched_paths(&slides_dir, &deck);
+
+        assert_eq!(watched.len(), 2);
+        assert!(
+            watched
+                .iter()
+                .all(|path| path.extension().is_some_and(|ext| ext == "md"))
+        );
     }
 }
