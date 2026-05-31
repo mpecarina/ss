@@ -101,8 +101,8 @@ if [[ "${LAUNCH_MODE}" == "window" ]]; then
 fi
 
 if [[ "${LAUNCH_MODE}" == "popup" ]]; then
-  # Do not let popup child exit statuses surface as tmux run-shell failures.
-  tmux display-popup -E -d "${PANE_PATH}" -w 90% -h 85% -- "${SHELL_BIN}" -lc "exec ${CMD_STR}" || true
+  # Popup mode is more reliable with a minimal POSIX shell than a user login shell.
+  tmux display-popup -E -d "${PANE_PATH}" -w 90% -h 85% -- /bin/sh -lc "exec ${CMD_STR}"
   exit 0
 fi
 
