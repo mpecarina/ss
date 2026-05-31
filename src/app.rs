@@ -100,6 +100,7 @@ struct App {
     search_match_index: usize,
     outline_query: String,
     command: String,
+    command_completion: Option<CommandCompletion>,
     text_scroll: usize,
     line_cursor: usize,
     body_rows: usize,
@@ -128,6 +129,13 @@ enum EscapeSequence {
     Csi,
 }
 
+#[derive(Clone, Debug)]
+struct CommandCompletion {
+    prefix: String,
+    matches: Vec<String>,
+    index: usize,
+}
+
 impl App {
     fn new(
         dir: PathBuf,
@@ -154,6 +162,7 @@ impl App {
             search_match_index: 0,
             outline_query: String::new(),
             command: String::new(),
+            command_completion: None,
             text_scroll: 0,
             line_cursor: 0,
             body_rows: 0,
@@ -270,10 +279,7 @@ impl App {
             active_row,
             selection,
         );
-        frame.render_widget(
-            Paragraph::new(viewport).alignment(Alignment::Left),
-            stage,
-        );
+        frame.render_widget(Paragraph::new(viewport).alignment(Alignment::Left), stage);
 
         let mut bottom = String::new();
         let mode_status = self.operational_status();
@@ -728,29 +734,87 @@ impl App {
             KeyCode::Esc => {
                 self.command_focus = false;
                 self.command.clear();
+                self.command_completion = None;
             }
             KeyCode::Enter => {
                 self.command_focus = false;
                 let command = self.command.trim().to_string();
                 self.command.clear();
+                self.command_completion = None;
                 if !command.is_empty() {
                     return self.execute_command(&command, stdout);
                 }
             }
             KeyCode::Backspace => {
                 self.command.pop();
+                self.command_completion = None;
+            }
+            KeyCode::Tab => {
+                self.cycle_command_completion(1);
+            }
+            KeyCode::BackTab => {
+                self.cycle_command_completion(-1);
             }
             KeyCode::Char(ch) => {
                 self.command.push(ch);
+                self.command_completion = None;
             }
             _ => {}
         }
         Ok(false)
     }
 
+    fn cycle_command_completion(&mut self, delta: isize) {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| self.dir.clone());
+        let request = command_completion_request(&self.command, &cwd);
+        let Some(request) = request else {
+            self.command_completion = None;
+            return;
+        };
+
+        let reuse_existing = self
+            .command_completion
+            .as_ref()
+            .is_some_and(|completion| completion.prefix == request.prefix)
+            && delta < 0;
+
+        if reuse_existing {
+            if let Some(completion) = &mut self.command_completion {
+                let len = completion.matches.len() as isize;
+                completion.index = (completion.index as isize + delta).rem_euclid(len) as usize;
+                self.command = completion.matches[completion.index].clone();
+            }
+            return;
+        }
+
+        let mut completion = request;
+        if delta < 0 {
+            completion.index = completion.matches.len().saturating_sub(1);
+            if completion.matches.len() > 1 {
+                completion.index = completion.matches.len().saturating_sub(1);
+            }
+        }
+        self.command = completion.matches[completion.index].clone();
+        self.command_completion = Some(completion);
+    }
+
+    fn clear_command_completion(&mut self) {
+        self.command_completion = None;
+    }
+
+    fn resolve_open_target(&self, path: &str) -> PathBuf {
+        let target = expand_tilde(path);
+        if target.is_absolute() {
+            target
+        } else {
+            self.dir.join(target)
+        }
+    }
+
     fn handle_paste(&mut self, data: String) {
         if self.command_focus {
             self.command.push_str(&data);
+            self.clear_command_completion();
             return;
         }
         if self.search_focus {
@@ -810,12 +874,7 @@ impl App {
     }
 
     fn open_path(&mut self, path: &str, stdout: &mut CrosstermBackend<Stdout>) -> Result<()> {
-        let target = PathBuf::from(path);
-        let resolved = if target.is_absolute() {
-            target
-        } else {
-            self.dir.join(target)
-        };
+        let resolved = self.resolve_open_target(path);
 
         self.clear_images(stdout)?;
         self.dir = resolved;
@@ -1438,6 +1497,176 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
 
 fn content_width(width: u16) -> u16 {
     width.saturating_sub(LINE_GUTTER_WIDTH)
+}
+
+fn command_completion_request(command: &str, cwd: &Path) -> Option<CommandCompletion> {
+    let (prefix, raw_path) = parse_open_command(command)?;
+    let matches = completion_matches(prefix, raw_path, cwd)?;
+    Some(CommandCompletion {
+        prefix: command.to_string(),
+        matches,
+        index: 0,
+    })
+}
+
+fn parse_open_command(command: &str) -> Option<(&str, &str)> {
+    if command == "open" {
+        return Some(("open ", ""));
+    }
+    if command == "o" {
+        return Some(("o ", ""));
+    }
+    if command == "e" {
+        return Some(("e ", ""));
+    }
+    if let Some(path) = command.strip_prefix("open ") {
+        return Some(("open ", path));
+    }
+    if let Some(path) = command.strip_prefix("o ") {
+        return Some(("o ", path));
+    }
+    if let Some(path) = command.strip_prefix("e ") {
+        return Some(("e ", path));
+    }
+    None
+}
+
+fn completion_matches(prefix: &str, raw_path: &str, cwd: &Path) -> Option<Vec<String>> {
+    let (display_parent, file_prefix, search_dir) = completion_parts(raw_path, cwd);
+    let mut matches = fs::read_dir(&search_dir)
+        .ok()?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let entry_type = entry.file_type().ok()?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with(&file_prefix) {
+                return None;
+            }
+            let is_markdown = entry
+                .path()
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
+            if !entry_type.is_dir() && !is_markdown {
+                return None;
+            }
+            Some((name, entry_type.is_dir()))
+        })
+        .collect::<Vec<_>>();
+
+    if matches.is_empty() {
+        return None;
+    }
+
+    matches.sort_by(|a, b| a.0.cmp(&b.0));
+    if matches.len() == 1 {
+        let (name, is_dir) = &matches[0];
+        let mut value = join_completion_path(&display_parent, name);
+        if *is_dir {
+            value.push('/');
+        }
+        return Some(vec![format!("{}{}", prefix, value)]);
+    }
+
+    let mut completions = Vec::new();
+    let common = longest_common_prefix(
+        &matches
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+    );
+    if common.len() > file_prefix.len() {
+        completions.push(format!(
+            "{}{}",
+            prefix,
+            join_completion_path(&display_parent, &common)
+        ));
+    }
+    for (name, is_dir) in &matches {
+        let mut value = join_completion_path(&display_parent, name);
+        if *is_dir {
+            value.push('/');
+        }
+        completions.push(format!("{}{}", prefix, value));
+    }
+    completions.dedup();
+    Some(completions)
+}
+
+fn completion_parts(raw_path: &str, cwd: &Path) -> (String, String, PathBuf) {
+    if raw_path.is_empty() {
+        return (String::new(), String::new(), cwd.to_path_buf());
+    }
+
+    let expanded = expand_tilde(raw_path);
+    let expanded_text = expanded.to_string_lossy().to_string();
+    let has_trailing_slash = raw_path.ends_with('/');
+    let path = Path::new(&expanded_text);
+    let parent = if has_trailing_slash {
+        Some(path)
+    } else {
+        path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+    };
+    let display_parent = parent
+        .map(|parent| parent.to_string_lossy().trim_end_matches('/').to_string())
+        .unwrap_or_default();
+    let file_prefix = if has_trailing_slash {
+        String::new()
+    } else {
+        path.file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default()
+    };
+    let search_dir = if path.is_absolute() {
+        parent
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("/"))
+    } else {
+        cwd.join(parent.unwrap_or_else(|| Path::new(".")))
+    };
+    (display_parent, file_prefix, search_dir)
+}
+
+fn expand_tilde(path: &str) -> PathBuf {
+    if path == "~" {
+        return home_dir().unwrap_or_else(|| PathBuf::from("~"));
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return home_dir()
+            .map(|home| home.join(rest))
+            .unwrap_or_else(|| PathBuf::from(path));
+    }
+    PathBuf::from(path)
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+fn join_completion_path(parent: &str, name: &str) -> String {
+    if parent.is_empty() || parent == "." {
+        name.to_string()
+    } else if parent == "/" {
+        format!("/{name}")
+    } else {
+        format!("{}/{}", parent.trim_end_matches('/'), name)
+    }
+}
+
+fn longest_common_prefix(items: &[&str]) -> String {
+    let Some(first) = items.first() else {
+        return String::new();
+    };
+    let mut prefix = (*first).to_string();
+    for item in items.iter().skip(1) {
+        while !item.starts_with(&prefix) {
+            prefix.pop();
+            if prefix.is_empty() {
+                return prefix;
+            }
+        }
+    }
+    prefix
 }
 
 fn terminal_cell_size() -> (u16, u16) {
@@ -2252,6 +2481,105 @@ mod tests {
         assert!(!should_quit);
         assert_eq!(app.deck.slides.len(), 1);
         assert_eq!(app.deck.slides[0].name, "single.md");
+    }
+
+    #[test]
+    fn tab_completes_open_command_directory_from_cwd() {
+        let temp = tempdir().expect("tempdir");
+        let original = std::env::current_dir().expect("cwd");
+        let slides_dir = temp.path().join("slides");
+        fs::create_dir_all(&slides_dir).expect("create slides dir");
+
+        std::env::set_current_dir(temp.path()).expect("set cwd");
+        let completed = complete_open_command("o sl", temp.path());
+        std::env::set_current_dir(original).expect("restore cwd");
+
+        assert_eq!(completed.as_deref(), Some("o slides/"));
+    }
+
+    #[test]
+    fn tab_completes_nested_relative_open_path() {
+        let temp = tempdir().expect("tempdir");
+        let docs_dir = temp.path().join("docs");
+        let agent_dir = docs_dir.join("agents");
+        fs::create_dir_all(&agent_dir).expect("create nested dirs");
+
+        let completed = complete_open_command("open docs/ag", temp.path());
+
+        assert_eq!(completed.as_deref(), Some("open docs/agents/"));
+    }
+
+    #[test]
+    fn tab_extends_to_shared_prefix_for_open_paths() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("slides-a")).expect("create first dir");
+        fs::create_dir_all(temp.path().join("slides-b")).expect("create second dir");
+
+        let completed = complete_open_command("e sl", temp.path());
+
+        assert_eq!(completed.as_deref(), Some("e slides-"));
+    }
+
+    #[test]
+    fn shift_tab_cycles_backward_through_open_completions() {
+        let temp = tempdir().expect("tempdir");
+        let original = std::env::current_dir().expect("cwd");
+        fs::create_dir_all(temp.path().join("slides-a")).expect("create first dir");
+        fs::create_dir_all(temp.path().join("slides-b")).expect("create second dir");
+
+        std::env::set_current_dir(temp.path()).expect("set cwd");
+        let mut app = App::new(
+            PathBuf::from("."),
+            sample_deck(),
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+            false,
+        );
+        app.command_focus = true;
+        app.command = "o sl".to_string();
+
+        app.handle_command_key(
+            KeyEvent::new(KeyCode::BackTab, crossterm::event::KeyModifiers::SHIFT),
+            &mut CrosstermBackend::new(io::stdout()),
+        )
+        .expect("shift-tab completion");
+        std::env::set_current_dir(original).expect("restore cwd");
+
+        assert_eq!(app.command, "o slides-b/");
+    }
+
+    #[test]
+    fn tilde_expands_for_open_command_execution() {
+        let temp = tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let slides_dir = home.join("slides");
+        fs::create_dir_all(&slides_dir).expect("create slides dir");
+        fs::write(slides_dir.join("01_one.md"), "# One\n").expect("write slide");
+
+        let previous_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+
+        let mut app = App::new(
+            PathBuf::from("."),
+            sample_deck(),
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+            false,
+        );
+        let mut stdout = CrosstermBackend::new(io::stdout());
+        let should_quit = app
+            .execute_command("open ~/slides", &mut stdout)
+            .expect("execute command");
+
+        match previous_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+
+        assert!(!should_quit);
+        assert_eq!(app.deck.slides[0].title, "One");
     }
 
     #[test]
