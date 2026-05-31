@@ -25,28 +25,9 @@ fi
 
 SHELL_BIN="${SHELL:-sh}"
 
-STAMP_FILE="${BIN_PATH}.commit"
-CURRENT_COMMIT="$(cd "${REPO_ROOT}" && git rev-parse HEAD 2>/dev/null || echo unknown)"
-NEEDS_BUILD=0
-
 if [[ ! -x "${BIN_PATH}" ]]; then
-  NEEDS_BUILD=1
-elif [[ ! -f "${STAMP_FILE}" ]]; then
-  NEEDS_BUILD=1
-elif [[ "$(cat "${STAMP_FILE}" 2>/dev/null)" != "${CURRENT_COMMIT}" ]]; then
-  NEEDS_BUILD=1
-fi
-
-if [[ "${NEEDS_BUILD}" -eq 1 ]]; then
-  tmux display-message "ss: building..."
-  if (cd "${REPO_ROOT}" && cargo build --release) >/dev/null 2>&1; then
-    mkdir -p "$(dirname "${BIN_PATH}")"
-    cp "${REPO_ROOT}/target/release/ss" "${BIN_PATH}"
-    echo "${CURRENT_COMMIT}" > "${STAMP_FILE}"
-  else
-    tmux display-message -d 5000 "ss: build failed — run 'cargo build --release' manually"
-    exit 1
-  fi
+  tmux display-message -d 5000 "ss: missing ${BIN_PATH} (plugin install incomplete)"
+  exit 1
 fi
 
 PANE_PATH="$(tmux display-message -p '#{pane_current_path}' || true)"

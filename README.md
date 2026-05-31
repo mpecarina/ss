@@ -6,11 +6,6 @@ tmux-aware markdown slideshow with kitty/ghostty image rendering.
 
 ```sh
 make build
-```
-
-Binary output:
-
-```sh
 ./bin/ss .
 ```
 
@@ -23,7 +18,7 @@ make run ARGS=./examples
 ## Tmux Plugin Usage
 
 Recommended: install through TPM so `prefix + U` updates the repo and the next
-launch rebuilds the binary automatically when the git commit changed.
+launch rebuilds `target/release/ss` automatically when the git commit changed.
 
 Add to your `~/.tmux.conf`:
 
@@ -60,8 +55,8 @@ prefix + I    install
 prefix + U    update
 ```
 
-The wrapper auto-builds when the binary is missing or the git commit changed,
-following the same thin tmux-wrapper model used in `rustasshn`.
+`bin/ss` is a tracked wrapper that auto-builds `target/release/ss` when the
+binary is missing or the git commit changed, matching the `rustasshn` model.
 
 ## Why Rust
 

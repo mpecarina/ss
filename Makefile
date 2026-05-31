@@ -11,9 +11,7 @@ test:
 	@cargo test
 
 build:
-	@mkdir -p $(LOCAL_BIN)
-	@cargo build --release
-	@cp target/release/ss $(LOCAL_BIN)/ss
+	@cargo build --release --locked
 
 run:
 	@cargo run --quiet --release -- $(ARGS)
