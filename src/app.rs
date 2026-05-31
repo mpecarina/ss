@@ -22,7 +22,7 @@ use ratatui::layout::Alignment;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::deck::{Deck, Slide, load_deck};
 use crate::graphics::{ImageBackend, ImageCompositor, detect_backend, placements_for_view};
@@ -271,9 +271,7 @@ impl App {
             selection,
         );
         frame.render_widget(
-            Paragraph::new(viewport)
-                .wrap(Wrap { trim: false })
-                .alignment(Alignment::Left),
+            Paragraph::new(viewport).alignment(Alignment::Left),
             stage,
         );
 
