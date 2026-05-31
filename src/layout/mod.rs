@@ -139,13 +139,7 @@ pub fn build_layout(slide: &Slide, viewport: Viewport) -> SlideLayout {
                 push_blank(&mut row, &mut lines, &mut searchable_text);
             }
             Block::List(block) => {
-                push_list_block(
-                    &block.items,
-                    wrap_width,
-                    &mut row,
-                    &mut lines,
-                    &mut searchable_text,
-                );
+                push_list_block(block, wrap_width, &mut row, &mut lines, &mut searchable_text);
                 push_blank(&mut row, &mut lines, &mut searchable_text);
             }
             Block::Code(block) => {
@@ -497,21 +491,36 @@ fn push_quote_block(
 }
 
 fn push_list_block(
-    items: &[crate::deck::model::ListItem],
+    block: &crate::deck::model::ListBlock,
     wrap_width: usize,
     row: &mut usize,
     lines: &mut Vec<LayoutLine>,
     searchable_text: &mut String,
 ) {
-    for item in items {
+    let prefix_width = match &block.kind {
+        crate::deck::model::ListKind::Unordered => 2,
+        crate::deck::model::ListKind::Ordered { start } => {
+            format!("{}.", start.saturating_add(block.items.len().saturating_sub(1)))
+                .chars()
+                .count()
+                + 1
+        }
+    };
+    for (index, item) in block.items.iter().enumerate() {
+        let prefix = match &block.kind {
+            crate::deck::model::ListKind::Unordered => "◆ ".to_string(),
+            crate::deck::model::ListKind::Ordered { start } => {
+                format!("{:<width$}", format!("{}.", start.saturating_add(index)), width = prefix_width)
+            }
+        };
         push_rich_inline_lines(
             &item.content,
-            wrap_width.saturating_sub(6),
+            wrap_width.saturating_sub(prefix_width + 4),
             Style::default().fg(Color::Gray),
             row,
             lines,
             searchable_text,
-            Some("◆ "),
+            Some(&prefix),
             None,
         );
     }
@@ -1247,7 +1256,9 @@ fn hover_hint_for_chunks(chunks: &[StyledChunk], link_urls: &[String]) -> Option
 mod tests {
     use std::path::PathBuf;
 
-    use crate::deck::model::{AssetRef, Block, HeadingBlock, ParagraphBlock, Slide};
+    use crate::deck::model::{
+        AssetRef, Block, HeadingBlock, ListBlock, ListItem, ListKind, ParagraphBlock, Slide,
+    };
 
     use super::*;
 
@@ -1588,5 +1599,43 @@ mod tests {
                 .iter()
                 .any(|span| span.content.contains('\u{10EEEE}'))
         }));
+    }
+
+    #[test]
+    fn renders_ordered_list_numbers() {
+        let slide = Slide {
+            blocks: vec![Block::List(ListBlock {
+                id: 0,
+                kind: ListKind::Ordered { start: 3 },
+                items: vec![
+                    ListItem {
+                        content: vec![Inline::Text("third".to_string())],
+                    },
+                    ListItem {
+                        content: vec![Inline::Text("fourth".to_string())],
+                    },
+                ],
+            })],
+            ..Slide::default()
+        };
+        let layout = build_layout(
+            &slide,
+            Viewport {
+                width: 40,
+                height: 10,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                unicode_placeholders: false,
+            },
+        );
+
+        assert!(layout
+            .lines
+            .iter()
+            .any(|line| line.spans.iter().any(|span| span.content.contains("3. "))));
+        assert!(layout
+            .lines
+            .iter()
+            .any(|line| line.spans.iter().any(|span| span.content.contains("4. "))));
     }
 }

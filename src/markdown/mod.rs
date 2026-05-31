@@ -6,7 +6,7 @@ use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, T
 use crate::deck::loader::resolve_asset;
 use crate::deck::model::{
     Block, CodeBlock, HeadingBlock, ImageBlock, ImageDisplay, Inline, ListBlock, ListItem,
-    ParagraphBlock, TableBlock,
+    ListKind, ParagraphBlock, TableBlock,
 };
 
 #[derive(Default)]
@@ -50,6 +50,7 @@ struct ParseState {
     quote_inlines: Vec<Inline>,
     list_items: Vec<ListItem>,
     list_item_inlines: Vec<Inline>,
+    list_kind: ListKind,
     table_rows: Vec<Vec<Vec<Inline>>>,
     table_row: Vec<Vec<Inline>>,
     table_cell: Vec<Inline>,
@@ -88,10 +89,15 @@ impl ParseState {
             Tag::Paragraph => {
                 self.flush_paragraph();
             }
-            Tag::List(_) => {
+            Tag::List(start) => {
                 self.flush_paragraph();
                 self.in_list = true;
                 self.list_items.clear();
+                self.list_kind = start
+                    .map(|start| ListKind::Ordered {
+                        start: start.try_into().unwrap_or(usize::MAX),
+                    })
+                    .unwrap_or_default();
             }
             Tag::Item => {
                 self.list_item_inlines.clear();
@@ -177,6 +183,7 @@ impl ParseState {
                 let id = self.next_id();
                 self.blocks.push(Block::List(ListBlock {
                     id,
+                    kind: std::mem::take(&mut self.list_kind),
                     items: std::mem::take(&mut self.list_items),
                 }));
             }
@@ -439,5 +446,15 @@ mod tests {
                 .iter()
                 .any(|inline| matches!(inline, Inline::Hint(text) if text == "this is a hint"))
         );
+    }
+
+    #[test]
+    fn preserves_ordered_list_start() {
+        let doc = parse_slide("3. third\n4. fourth", Path::new("."), 0).unwrap();
+        let Block::List(block) = &doc.blocks[0] else {
+            panic!("expected list block");
+        };
+        assert!(matches!(block.kind, ListKind::Ordered { start: 3 }));
+        assert_eq!(block.items.len(), 2);
     }
 }

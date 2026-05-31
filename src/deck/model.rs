@@ -61,12 +61,20 @@ pub struct ParagraphBlock {
 #[derive(Clone, Debug, Default)]
 pub struct ListBlock {
     pub id: BlockId,
+    pub kind: ListKind,
     pub items: Vec<ListItem>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct ListItem {
     pub content: Vec<Inline>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub enum ListKind {
+    #[default]
+    Unordered,
+    Ordered { start: usize },
 }
 
 #[derive(Clone, Debug, Default)]

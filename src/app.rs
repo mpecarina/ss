@@ -465,8 +465,7 @@ impl App {
             .unwrap_or_default();
         let width = match layout {
             "image" | "hero" => area.width.saturating_sub(4),
-            _ if area.width > 120 => 96,
-            _ if area.width > 90 => area.width.saturating_sub(10),
+            _ if area.width > 90 => area.width.saturating_sub(4),
             _ => area.width.saturating_sub(4),
         }
         .max(10)
