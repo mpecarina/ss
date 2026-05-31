@@ -51,6 +51,7 @@ pub struct LayoutLine {
     pub heading_level: Option<u8>,
     pub link_urls: Vec<String>,
     pub link_regions: Vec<LinkRegion>,
+    pub hover_hint: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -179,6 +180,7 @@ pub fn build_layout(slide: &Slide, viewport: Viewport) -> SlideLayout {
                     heading_level: None,
                     link_urls: Vec::new(),
                     link_regions: Vec::new(),
+                    hover_hint: None,
                 });
                 searchable_text.push('\n');
                 row += 1;
@@ -244,6 +246,7 @@ pub fn viewport_lines(
     selected_match: Option<usize>,
     active_row: Option<usize>,
     selection: Option<(usize, usize)>,
+    reveal_hover_hint: bool,
 ) -> Vec<Line<'static>> {
     let end = scroll.saturating_add(height);
     let mut out = Vec::new();
@@ -294,8 +297,12 @@ pub fn viewport_lines(
                 .enumerate()
                 .filter(|(_, hit)| hit.row == row)
                 .collect::<Vec<_>>();
+            let show_hover_hint = reveal_hover_hint && is_active_row;
             if row_matches.is_empty() || line.search_text.is_empty() {
                 prefixed_spans.extend(base_spans);
+                if show_hover_hint {
+                    append_hover_hint(&mut prefixed_spans, line);
+                }
                 out.push(Line::from(prefixed_spans));
                 continue;
             }
@@ -314,12 +321,29 @@ pub fn viewport_lines(
                     spans.push(span.clone());
                 }
             }
+            if show_hover_hint {
+                append_hover_hint(&mut spans, line);
+            }
             out.push(Line::from(spans));
         } else {
             out.push(Line::from(String::new()));
         }
     }
     out
+}
+
+fn append_hover_hint(spans: &mut Vec<Span<'static>>, line: &LayoutLine) {
+    let Some(hint) = line.hover_hint.as_deref() else {
+        return;
+    };
+    spans.push(Span::styled(
+        "  ".to_string(),
+        Style::default().fg(Color::DarkGray),
+    ));
+    spans.push(Span::styled(
+        format!(":: {}", hint),
+        Style::default().fg(Color::Rgb(128, 144, 168)),
+    ));
 }
 
 fn push_heading_block(
@@ -355,6 +379,7 @@ fn push_heading_block(
             heading_level: None,
             link_urls: Vec::new(),
             link_regions: Vec::new(),
+            hover_hint: None,
         });
         searchable_text.push('\n');
         *row += 1;
@@ -385,6 +410,7 @@ fn push_heading_block(
             heading_level: None,
             link_urls: Vec::new(),
             link_regions: Vec::new(),
+            hover_hint: None,
         });
         searchable_text.push('\n');
         *row += 1;
@@ -436,6 +462,7 @@ fn push_quote_block(
         heading_level: None,
         link_urls: Vec::new(),
         link_regions: Vec::new(),
+        hover_hint: None,
     });
     searchable_text.push('\n');
     *row += 1;
@@ -451,6 +478,7 @@ fn push_quote_block(
         heading_level: None,
         link_urls: Vec::new(),
         link_regions: Vec::new(),
+        hover_hint: None,
     });
     searchable_text.push('\n');
     *row += 1;
@@ -515,6 +543,7 @@ fn push_code_block(
         heading_level: None,
         link_urls: Vec::new(),
         link_regions: Vec::new(),
+        hover_hint: None,
     });
     searchable_text.push('\n');
     *row += 1;
@@ -543,6 +572,7 @@ fn push_code_block(
             heading_level: None,
             link_urls: Vec::new(),
             link_regions: Vec::new(),
+            hover_hint: None,
         });
         searchable_text.push_str(raw_line);
         searchable_text.push('\n');
@@ -560,6 +590,7 @@ fn push_code_block(
         heading_level: None,
         link_urls: Vec::new(),
         link_regions: Vec::new(),
+        hover_hint: None,
     });
     searchable_text.push('\n');
     *row += 1;
@@ -600,6 +631,7 @@ fn push_table_block(
         heading_level: None,
         link_urls: Vec::new(),
         link_regions: Vec::new(),
+        hover_hint: None,
     });
     searchable_text.push('\n');
     *row += 1;
@@ -623,6 +655,7 @@ fn push_table_block(
             heading_level: None,
             link_urls: Vec::new(),
             link_regions: Vec::new(),
+            hover_hint: None,
         });
         searchable_text.push_str(&table_row.join(" "));
         searchable_text.push('\n');
@@ -639,6 +672,7 @@ fn push_table_block(
                 heading_level: None,
                 link_urls: Vec::new(),
                 link_regions: Vec::new(),
+                hover_hint: None,
             });
             searchable_text.push('\n');
             *row += 1;
@@ -656,6 +690,7 @@ fn push_table_block(
         heading_level: None,
         link_urls: Vec::new(),
         link_regions: Vec::new(),
+        hover_hint: None,
     });
     searchable_text.push('\n');
     *row += 1;
@@ -819,6 +854,7 @@ fn push_rich_inline_lines(
             }
             current_col += width;
         }
+        let hover_hint = hover_hint_for_urls(&link_urls);
         for chunk in wrapped_line {
             spans.push(Span::styled(chunk.text, chunk.style));
         }
@@ -830,6 +866,7 @@ fn push_rich_inline_lines(
             heading_level,
             link_urls,
             link_regions,
+            hover_hint,
         });
         searchable_text.push_str(&search_text);
         searchable_text.push('\n');
@@ -1116,6 +1153,7 @@ fn push_image_placeholder_block(
             heading_level: None,
             link_urls: Vec::new(),
             link_regions: Vec::new(),
+            hover_hint: None,
         });
         searchable_text.push('\n');
     }
@@ -1138,9 +1176,22 @@ fn push_blank(row: &mut usize, lines: &mut Vec<LayoutLine>, searchable_text: &mu
         heading_level: None,
         link_urls: Vec::new(),
         link_regions: Vec::new(),
+        hover_hint: None,
     });
     searchable_text.push('\n');
     *row += 1;
+}
+
+fn hover_hint_for_urls(link_urls: &[String]) -> Option<String> {
+    let first = link_urls.first()?.trim();
+    if first.is_empty() {
+        return None;
+    }
+    let mut hint = first.to_string();
+    if link_urls.len() > 1 {
+        hint.push_str(&format!(" (+{} more)", link_urls.len() - 1));
+    }
+    Some(hint)
 }
 
 #[cfg(test)]
@@ -1210,6 +1261,95 @@ mod tests {
         assert_eq!(line.link_regions[0].start_col, 0);
         assert_eq!(line.link_regions[0].end_col, 9);
         assert_eq!(line.link_regions[0].url, "https://example.com");
+        assert_eq!(line.hover_hint.as_deref(), Some("https://example.com"));
+    }
+
+    #[test]
+    fn hover_hint_stays_hidden_until_requested() {
+        let slide = Slide {
+            blocks: vec![Block::Paragraph(ParagraphBlock {
+                id: 0,
+                content: vec![Inline::Link {
+                    text: "example".to_string(),
+                    url: "https://example.com/docs".to_string(),
+                }],
+            })],
+            ..Slide::default()
+        };
+        let layout = build_layout(
+            &slide,
+            Viewport {
+                width: 60,
+                height: 10,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                unicode_placeholders: false,
+            },
+        );
+
+        let hidden = viewport_lines(&layout, 0, 4, &[], None, Some(0), Some((0, 0)), false);
+        let visible = viewport_lines(&layout, 0, 4, &[], None, Some(0), Some((0, 0)), true);
+
+        assert!(
+            hidden[0]
+                .spans
+                .iter()
+                .all(|span| !span.content.contains("https://example.com/docs"))
+        );
+        assert!(
+            visible[0]
+                .spans
+                .iter()
+                .any(|span| span.content.contains("https://example.com/docs"))
+        );
+    }
+
+    #[test]
+    fn hover_hint_only_renders_on_active_row() {
+        let slide = Slide {
+            blocks: vec![
+                Block::Paragraph(ParagraphBlock {
+                    id: 0,
+                    content: vec![Inline::Link {
+                        text: "first".to_string(),
+                        url: "https://example.com/first".to_string(),
+                    }],
+                }),
+                Block::Paragraph(ParagraphBlock {
+                    id: 1,
+                    content: vec![Inline::Link {
+                        text: "second".to_string(),
+                        url: "https://example.com/second".to_string(),
+                    }],
+                }),
+            ],
+            ..Slide::default()
+        };
+        let layout = build_layout(
+            &slide,
+            Viewport {
+                width: 60,
+                height: 10,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                unicode_placeholders: false,
+            },
+        );
+
+        let visible = viewport_lines(&layout, 0, 6, &[], None, Some(2), Some((0, 2)), true);
+
+        assert!(
+            !visible[0]
+                .spans
+                .iter()
+                .any(|span| span.content.contains("https://example.com/first"))
+        );
+        assert!(
+            visible[2]
+                .spans
+                .iter()
+                .any(|span| span.content.contains("https://example.com/second"))
+        );
     }
 
     #[test]

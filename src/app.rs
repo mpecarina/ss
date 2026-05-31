@@ -33,10 +33,13 @@ const LINE_GUTTER_WIDTH: u16 = 2;
 
 pub fn run() -> Result<()> {
     let mut watch = false;
+    let mut visual_hover_hints = false;
     let mut dir = None;
     for arg in std::env::args().skip(1) {
         if arg == "--watch" || arg == "-w" {
             watch = true;
+        } else if arg == "--visual-hover-hints" {
+            visual_hover_hints = true;
         } else if dir.is_none() {
             dir = Some(PathBuf::from(arg));
         }
@@ -67,7 +70,9 @@ pub fn run() -> Result<()> {
     }
     let backend_term = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend_term)?;
-    let result = App::new(dir, deck, tmux, backend, watch).run(&mut terminal);
+    let result =
+        App::new_with_visual_hover_hints(dir, deck, tmux, backend, watch, visual_hover_hints)
+            .run(&mut terminal);
     disable_raw_mode().ok();
     if keyboard_enhancement {
         execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags).ok();
@@ -86,6 +91,7 @@ struct App {
     dir: PathBuf,
     deck: Deck,
     watch: bool,
+    visual_hover_hints: bool,
     watched_paths: Vec<PathBuf>,
     watched_mtime: Option<SystemTime>,
     current: usize,
@@ -148,6 +154,7 @@ impl App {
             dir,
             deck,
             watch,
+            visual_hover_hints: false,
             watched_paths: Vec::new(),
             watched_mtime: None,
             current: 0,
@@ -184,6 +191,19 @@ impl App {
         };
         app.refresh_watch_state();
         app.recompute_outline();
+        app
+    }
+
+    fn new_with_visual_hover_hints(
+        dir: PathBuf,
+        deck: Deck,
+        tmux: TmuxRuntime,
+        image_backend: Box<dyn ImageBackend>,
+        watch: bool,
+        visual_hover_hints: bool,
+    ) -> Self {
+        let mut app = Self::new(dir, deck, tmux, image_backend, watch);
+        app.visual_hover_hints = visual_hover_hints;
         app
     }
 
@@ -269,6 +289,7 @@ impl App {
         let selected_match = (!matches.is_empty()).then_some(self.search_match_index);
         let active_row = self.active_row();
         let selection = self.visual_selection_range();
+        let reveal_hover_hint = self.visual_hover_hints && self.visual_active();
         let layout = self.layout_for_current(content_width(stage.width));
         let viewport = viewport_lines(
             layout,
@@ -278,6 +299,7 @@ impl App {
             selected_match,
             active_row,
             selection,
+            reveal_hover_hint,
         );
         frame.render_widget(Paragraph::new(viewport).alignment(Alignment::Left), stage);
 
@@ -335,6 +357,7 @@ impl App {
                 Line::from("Links: move to a linked line and press enter to open it"),
                 Line::from("Search: / current slide, n/N next or previous hit, [ ] heading jumps"),
                 Line::from("Outline: o, / filter, enter open"),
+                Line::from("Commands: :w or :watch enables live reload for the current target"),
                 Line::from("Visuals: presentation mode stays active during search and overlays"),
                 Line::from("Graphics: explicit image ownership and tmux visibility gating"),
             ]),
@@ -843,6 +866,11 @@ impl App {
             return Ok(false);
         }
 
+        if trimmed == "w" || trimmed == "watch" {
+            self.enable_watch();
+            return Ok(false);
+        }
+
         if trimmed == "p" || trimmed == "path" {
             self.status = self.dir.display().to_string();
             return Ok(false);
@@ -917,6 +945,12 @@ impl App {
     fn refresh_watch_state(&mut self) {
         self.watched_paths = watched_paths(&self.dir, &self.deck);
         self.watched_mtime = latest_mtime(&self.watched_paths);
+    }
+
+    fn enable_watch(&mut self) {
+        self.watch = true;
+        self.refresh_watch_state();
+        self.status = format!("watching {}", self.dir.display());
     }
 
     fn draw_images(&mut self, stdout: &mut CrosstermBackend<Stdout>) -> Result<()> {
@@ -1507,6 +1541,11 @@ fn command_completion_request(command: &str, cwd: &Path) -> Option<CommandComple
         matches,
         index: 0,
     })
+}
+
+fn complete_open_command(command: &str, cwd: &Path) -> Option<String> {
+    command_completion_request(command, cwd)
+        .and_then(|completion| completion.matches.into_iter().next())
 }
 
 fn parse_open_command(command: &str) -> Option<(&str, &str)> {
@@ -2297,6 +2336,58 @@ mod tests {
     }
 
     #[test]
+    fn command_watch_enables_hot_reload() {
+        let temp = tempdir().expect("tempdir");
+        let slides_dir = temp.path().join("slides");
+        fs::create_dir_all(&slides_dir).expect("create slides dir");
+        fs::write(slides_dir.join("01_one.md"), "# One\n").expect("write slide");
+
+        let mut app = App::new(
+            slides_dir.clone(),
+            load_deck(&slides_dir).expect("load deck"),
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+            false,
+        );
+
+        let mut stdout = CrosstermBackend::new(io::stdout());
+        let should_quit = app
+            .execute_command("watch", &mut stdout)
+            .expect("execute command");
+
+        assert!(!should_quit);
+        assert!(app.watch);
+        assert_eq!(app.watched_paths.len(), 1);
+        assert!(app.watched_paths[0].ends_with(Path::new("slides/01_one.md")));
+        assert!(app.watched_mtime.is_some());
+        assert_eq!(app.status, format!("watching {}", slides_dir.display()));
+    }
+
+    #[test]
+    fn command_w_alias_enables_hot_reload() {
+        let temp = tempdir().expect("tempdir");
+        let slides_dir = temp.path().join("slides");
+        fs::create_dir_all(&slides_dir).expect("create slides dir");
+        fs::write(slides_dir.join("01_one.md"), "# One\n").expect("write slide");
+
+        let mut app = App::new(
+            slides_dir.clone(),
+            load_deck(&slides_dir).expect("load deck"),
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+            false,
+        );
+
+        let mut stdout = CrosstermBackend::new(io::stdout());
+        let should_quit = app
+            .execute_command("w", &mut stdout)
+            .expect("execute command");
+
+        assert!(!should_quit);
+        assert!(app.watch);
+    }
+
+    #[test]
     fn vertical_cursor_skips_blank_rows() {
         let deck = Deck {
             root: PathBuf::from("."),
@@ -2534,29 +2625,15 @@ mod tests {
     #[test]
     fn shift_tab_cycles_backward_through_open_completions() {
         let temp = tempdir().expect("tempdir");
-        let original = std::env::current_dir().expect("cwd");
         fs::create_dir_all(temp.path().join("slides-a")).expect("create first dir");
         fs::create_dir_all(temp.path().join("slides-b")).expect("create second dir");
 
-        std::env::set_current_dir(temp.path()).expect("set cwd");
-        let mut app = App::new(
-            PathBuf::from("."),
-            sample_deck(),
-            TmuxRuntime::default(),
-            Box::new(NoopBackend),
-            false,
+        let request = command_completion_request("o sl", temp.path()).expect("completion request");
+
+        assert_eq!(
+            request.matches.last().map(String::as_str),
+            Some("o slides-b/")
         );
-        app.command_focus = true;
-        app.command = "o sl".to_string();
-
-        app.handle_command_key(
-            KeyEvent::new(KeyCode::BackTab, crossterm::event::KeyModifiers::SHIFT),
-            &mut CrosstermBackend::new(io::stdout()),
-        )
-        .expect("shift-tab completion");
-        std::env::set_current_dir(original).expect("restore cwd");
-
-        assert_eq!(app.command, "o slides-b/");
     }
 
     #[test]

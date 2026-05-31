@@ -9,6 +9,7 @@ make build
 ./bin/ss .
 ./bin/ss --watch .
 ./bin/ss -w .
+./bin/ss --visual-hover-hints .
 ```
 
 Run directly:
@@ -88,11 +89,13 @@ Command prompt:
 - `:open <path>`, `:o <path>`, or `:e <path>`: load a different slide directory or a single markdown file
 - `:path` or `:p`: show the current loaded path
 - `:reload` or `:r`: reload the current target
+- `:watch` or `:w`: enable live reload for the current target during this session
 - `:quit`: quit
 
 Live reload:
 
 - `ss --watch <path>` or `ss -w <path>` polls the currently loaded markdown file(s) and reloads when they change
+- `ss --visual-hover-hints <path>` reveals hidden markdown link targets as a trailing inline hint only for the selected row in visual mode
 
 ## Development
 
