@@ -1543,11 +1543,6 @@ fn command_completion_request(command: &str, cwd: &Path) -> Option<CommandComple
     })
 }
 
-fn complete_open_command(command: &str, cwd: &Path) -> Option<String> {
-    command_completion_request(command, cwd)
-        .and_then(|completion| completion.matches.into_iter().next())
-}
-
 fn parse_open_command(command: &str) -> Option<(&str, &str)> {
     if command == "open" {
         return Some(("open ", ""));
