@@ -990,7 +990,7 @@ impl App {
 
     fn move_line_cursor(&mut self, delta: isize) {
         let max_row = self.current_layout_rows().saturating_sub(1) as isize;
-        let next = (self.line_cursor as isize + delta).clamp(0, max_row.max(0)) as usize;
+        let next = self.next_cursor_row(self.line_cursor, delta, max_row);
         self.line_cursor = next;
         self.ensure_line_cursor_visible();
     }
@@ -1003,9 +1003,39 @@ impl App {
 
     fn move_visual_cursor(&mut self, delta: isize) {
         let max_row = self.current_layout_rows().saturating_sub(1) as isize;
-        let next = (self.visual_cursor as isize + delta).clamp(0, max_row.max(0)) as usize;
+        let next = self.next_cursor_row(self.visual_cursor, delta, max_row);
         self.visual_cursor = next;
         self.ensure_visual_cursor_visible();
+    }
+
+    fn next_cursor_row(&mut self, current: usize, delta: isize, max_row: isize) -> usize {
+        let next = (current as isize + delta).clamp(0, max_row.max(0)) as usize;
+        if delta == 0 {
+            return next;
+        }
+
+        let direction = delta.signum();
+        let width = self
+            .text_rect
+            .map(|rect| content_width(rect.width))
+            .unwrap_or(80);
+        let layout = self.layout_for_current(width);
+        let mut row = next as isize;
+
+        while row >= 0 && row <= max_row {
+            let is_blank = layout
+                .lines
+                .iter()
+                .find(|line| line.row == row as usize)
+                .map(|line| line.search_text.trim().is_empty())
+                .unwrap_or(true);
+            if !is_blank {
+                return row as usize;
+            }
+            row += direction;
+        }
+
+        next
     }
 
     fn ensure_line_cursor_visible(&mut self) {
@@ -1525,5 +1555,83 @@ mod tests {
         let link = app.first_link_on_row(0);
 
         assert_eq!(link, None);
+    }
+
+    #[test]
+    fn vertical_cursor_skips_blank_rows() {
+        let deck = Deck {
+            root: PathBuf::from("."),
+            metadata: DeckMetadata {
+                title: "deck".to_string(),
+            },
+            slides: vec![Slide {
+                id: 0,
+                title: "title".to_string(),
+                name: "00.md".to_string(),
+                blocks: vec![
+                    Block::Paragraph(ParagraphBlock {
+                        id: 0,
+                        content: vec![crate::deck::model::Inline::Text("hello".to_string())],
+                    }),
+                    Block::Paragraph(ParagraphBlock {
+                        id: 1,
+                        content: vec![crate::deck::model::Inline::Text("world".to_string())],
+                    }),
+                ],
+                ..Slide::default()
+            }],
+        };
+        let mut app = App::new(
+            PathBuf::from("."),
+            deck,
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+        );
+        app.body_rows = 4;
+        app.text_rect = Some(Rect::new(0, 0, 40, 4));
+
+        app.move_line_cursor(1);
+
+        assert_eq!(app.line_cursor, 2);
+    }
+
+    #[test]
+    fn visual_cursor_skips_blank_rows() {
+        let deck = Deck {
+            root: PathBuf::from("."),
+            metadata: DeckMetadata {
+                title: "deck".to_string(),
+            },
+            slides: vec![Slide {
+                id: 0,
+                title: "title".to_string(),
+                name: "00.md".to_string(),
+                blocks: vec![
+                    Block::Paragraph(ParagraphBlock {
+                        id: 0,
+                        content: vec![crate::deck::model::Inline::Text("hello".to_string())],
+                    }),
+                    Block::Paragraph(ParagraphBlock {
+                        id: 1,
+                        content: vec![crate::deck::model::Inline::Text("world".to_string())],
+                    }),
+                ],
+                ..Slide::default()
+            }],
+        };
+        let mut app = App::new(
+            PathBuf::from("."),
+            deck,
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
+        );
+        app.body_rows = 4;
+        app.text_rect = Some(Rect::new(0, 0, 40, 4));
+        app.visual_anchor = Some(0);
+        app.visual_cursor = 0;
+
+        app.move_visual_cursor(1);
+
+        assert_eq!(app.visual_cursor, 2);
     }
 }
