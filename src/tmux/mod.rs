@@ -13,6 +13,8 @@ pub struct TmuxRuntime {
     pub session_id: String,
     pub launch_mode: LaunchMode,
     pub runtime_id: String,
+    pub popup_top: Option<u16>,
+    pub popup_left: Option<u16>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -56,6 +58,12 @@ impl TmuxRuntime {
             _ => LaunchMode::Popup,
         };
         let runtime_id = std::env::var("SS_RUNTIME_ID").unwrap_or_else(|_| generate_runtime_id());
+        let popup_top = std::env::var("SS_TMUX_POPUP_Y")
+            .ok()
+            .and_then(|value| value.parse().ok());
+        let popup_left = std::env::var("SS_TMUX_POPUP_X")
+            .ok()
+            .and_then(|value| value.parse().ok());
         Self {
             socket,
             pane_id,
@@ -63,6 +71,8 @@ impl TmuxRuntime {
             session_id,
             launch_mode,
             runtime_id,
+            popup_top,
+            popup_left,
         }
     }
 
@@ -99,24 +109,37 @@ impl TmuxRuntime {
 
         let mut target_parts = target.trim().split('|');
         let mut active_parts = active.trim().split('|');
+        let session_attached = target_parts.next().unwrap_or("0") != "0";
+        let fallback_pane_top = target_parts
+            .next()
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or_default();
+        let fallback_pane_left = target_parts
+            .next()
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or_default();
         let active_session_id = active_parts.next().unwrap_or_default();
         let active_window_id = active_parts.next().unwrap_or_default();
         let active_pane_id = active_parts.next().unwrap_or_default();
+        let pane_top = if self.launch_mode == LaunchMode::Popup {
+            self.popup_top.unwrap_or(fallback_pane_top)
+        } else {
+            fallback_pane_top
+        };
+        let pane_left = if self.launch_mode == LaunchMode::Popup {
+            self.popup_left.unwrap_or(fallback_pane_left)
+        } else {
+            fallback_pane_left
+        };
+
         Ok(VisibilityState {
-            session_attached: target_parts.next().unwrap_or("0") != "0"
-                && active_session_id == self.session_id,
+            session_attached: session_attached && active_session_id == self.session_id,
             window_active: active_window_id == self.window_id,
             pane_active: active_pane_id == self.pane_id,
-            pane_top: target_parts
-                .next()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or_default(),
-            pane_left: target_parts
-                .next()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or_default(),
+            pane_top,
+            pane_left,
         })
     }
 

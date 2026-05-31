@@ -82,7 +82,6 @@ That prevents images from leaking over other tmux windows.
 - natural filename sorting (`00_`, `01_`, `10_`, etc.)
 - `![](./image.png)` style local image detection
 - `[text](url)` style markdown links can be opened from the active line
-- mouse click on rendered markdown links opens them directly
 - kitty/ghostty image drawing with tmux passthrough wrapping
 - tmux focus polling clears images when the popup is hidden or inactive
 
@@ -93,7 +92,6 @@ That prevents images from leaking over other tmux windows.
 - `g`, `gg`: first slide
 - `G`: last slide
 - `enter`: open the first markdown link on the active line, otherwise next slide
-- left click: open the clicked markdown link and move the active row there
 - `o`: outline / slide list
 - `/`: search current slide, or filter outline when outline is open
 - `n`, `N`: next / previous hit in current slide search

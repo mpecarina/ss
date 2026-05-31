@@ -895,10 +895,15 @@ impl App {
         &self.deck.slides[self.current]
     }
 
-    fn active_line_links(&mut self) -> Vec<String> {
-        let Some(row) = self.active_row() else {
-            return Vec::new();
+    fn follow_active_link(&mut self) -> Result<bool> {
+        let Some((url, link_count)) = self.active_row().and_then(|row| self.first_link_on_row(row)) else {
+            return Ok(false);
         };
+        self.open_link(&url, link_count)?;
+        Ok(true)
+    }
+
+    fn first_link_on_row(&mut self, row: usize) -> Option<(String, usize)> {
         let width = self
             .text_rect
             .map(|rect| content_width(rect.width))
@@ -907,60 +912,23 @@ impl App {
             .lines
             .iter()
             .find(|line| line.row == row)
-            .map(|line| line.link_urls.clone())
-            .unwrap_or_default()
+            .and_then(|line| line.link_urls.first().map(|url| (url.clone(), line.link_urls.len())))
     }
 
-    fn link_at_screen_position(&mut self, column: u16, row: u16) -> Option<String> {
-        let text_rect = self.text_rect?;
-        if row < text_rect.y
-            || row >= text_rect.y.saturating_add(text_rect.height)
-            || column < text_rect.x
-            || column >= text_rect.x.saturating_add(text_rect.width)
-        {
-            return None;
-        }
-
-        let layout_row = self
-            .text_scroll
-            .saturating_add((row.saturating_sub(text_rect.y)) as usize);
-        let relative_col = column.saturating_sub(text_rect.x) as usize;
-        if relative_col < LINE_GUTTER_WIDTH as usize {
-            return None;
-        }
-        let content_col = relative_col - LINE_GUTTER_WIDTH as usize;
-        let width = content_width(text_rect.width);
-
-        self.layout_for_current(width)
-            .lines
-            .iter()
-            .find(|line| line.row == layout_row)
-            .and_then(|line| {
-                line.link_regions
-                    .iter()
-                    .find(|region| content_col >= region.start_col && content_col < region.end_col)
-                    .map(|region| region.url.clone())
-            })
-    }
-
-    fn follow_active_link(&mut self) -> Result<bool> {
-        let links = self.active_line_links();
-        let Some(url) = links.first() else {
-            return Ok(false);
-        };
+    fn open_link(&mut self, url: &str, link_count: usize) -> Result<()> {
         let slide_path = self.current_slide().path.clone();
         let target = resolve_link_target(&slide_path, url);
         open_link_target(&target)?;
-        self.status = if links.len() > 1 {
+        self.status = if link_count > 1 {
             format!(
                 "opened {} (first of {} links on line)",
                 target.display(),
-                links.len()
+                link_count
             )
         } else {
             format!("opened {}", target.display())
         };
-        Ok(true)
+        Ok(())
     }
 
     fn visual_active(&self) -> bool {
@@ -1506,7 +1474,7 @@ mod tests {
     }
 
     #[test]
-    fn link_at_screen_position_hits_clickable_link_text() {
+    fn first_link_on_row_returns_first_link_for_line() {
         let deck = Deck {
             root: PathBuf::from("."),
             metadata: DeckMetadata {
@@ -1518,10 +1486,13 @@ mod tests {
                 name: "00.md".to_string(),
                 blocks: vec![Block::Paragraph(ParagraphBlock {
                     id: 0,
-                    content: vec![crate::deck::model::Inline::Link {
-                        text: "example".to_string(),
-                        url: "https://example.com".to_string(),
-                    }],
+                    content: vec![
+                        crate::deck::model::Inline::Text("before ".to_string()),
+                        crate::deck::model::Inline::Link {
+                            text: "example".to_string(),
+                            url: "https://example.com".to_string(),
+                        },
+                    ],
                 })],
                 ..Slide::default()
             }],
@@ -1535,10 +1506,24 @@ mod tests {
         app.body_rows = 4;
         app.text_rect = Some(Rect::new(10, 5, 30, 4));
 
-        assert_eq!(
-            app.link_at_screen_position(12, 5),
-            Some("https://example.com".to_string())
+        let link = app.first_link_on_row(0);
+
+        assert_eq!(link, Some(("https://example.com".to_string(), 1)));
+    }
+
+    #[test]
+    fn first_link_on_row_returns_none_without_links() {
+        let mut app = App::new(
+            PathBuf::from("."),
+            sample_deck(),
+            TmuxRuntime::default(),
+            Box::new(NoopBackend),
         );
-        assert_eq!(app.link_at_screen_position(10, 5), None);
+        app.body_rows = 4;
+        app.text_rect = Some(Rect::new(10, 5, 30, 4));
+
+        let link = app.first_link_on_row(0);
+
+        assert_eq!(link, None);
     }
 }
