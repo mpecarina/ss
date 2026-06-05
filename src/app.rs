@@ -1546,11 +1546,6 @@ fn command_completion_request(command: &str, cwd: &Path) -> Option<CommandComple
     })
 }
 
-fn complete_open_command(command: &str, cwd: &Path) -> Option<String> {
-    command_completion_request(command, cwd)
-        .and_then(|completion| completion.matches.into_iter().next())
-}
-
 fn parse_open_command(command: &str) -> Option<(&str, &str)> {
     if command == "open" {
         return Some(("open ", ""));
@@ -2621,43 +2616,6 @@ mod tests {
     }
 
     #[test]
-    fn tab_completes_open_command_directory_from_cwd() {
-        let temp = tempdir().expect("tempdir");
-        let original = std::env::current_dir().expect("cwd");
-        let slides_dir = temp.path().join("slides");
-        fs::create_dir_all(&slides_dir).expect("create slides dir");
-
-        std::env::set_current_dir(temp.path()).expect("set cwd");
-        let completed = complete_open_command("o sl", temp.path());
-        std::env::set_current_dir(original).expect("restore cwd");
-
-        assert_eq!(completed.as_deref(), Some("o slides/"));
-    }
-
-    #[test]
-    fn tab_completes_nested_relative_open_path() {
-        let temp = tempdir().expect("tempdir");
-        let docs_dir = temp.path().join("docs");
-        let agent_dir = docs_dir.join("agents");
-        fs::create_dir_all(&agent_dir).expect("create nested dirs");
-
-        let completed = complete_open_command("open docs/ag", temp.path());
-
-        assert_eq!(completed.as_deref(), Some("open docs/agents/"));
-    }
-
-    #[test]
-    fn tab_extends_to_shared_prefix_for_open_paths() {
-        let temp = tempdir().expect("tempdir");
-        fs::create_dir_all(temp.path().join("slides-a")).expect("create first dir");
-        fs::create_dir_all(temp.path().join("slides-b")).expect("create second dir");
-
-        let completed = complete_open_command("e sl", temp.path());
-
-        assert_eq!(completed.as_deref(), Some("e slides-"));
-    }
-
-    #[test]
     fn shift_tab_cycles_backward_through_open_completions() {
         let temp = tempdir().expect("tempdir");
         fs::create_dir_all(temp.path().join("slides-a")).expect("create first dir");
@@ -2703,23 +2661,6 @@ mod tests {
 
         assert!(!should_quit);
         assert_eq!(app.deck.slides[0].title, "One");
-    }
-
-    #[test]
-    fn tab_completion_keeps_explicit_absolute_path_anchor() {
-        let temp = tempdir().expect("tempdir");
-        let root = temp.path().join("root");
-        let deck_dir = root.join("deck-alpha");
-        fs::create_dir_all(&deck_dir).expect("create deck dir");
-        fs::create_dir_all(temp.path().join("cwd-only")).expect("create cwd-only dir");
-
-        let command = format!("open {}/de", root.display());
-        let completed = complete_open_command(&command, temp.path());
-
-        assert_eq!(
-            completed.as_deref(),
-            Some(format!("open {}/deck-alpha/", root.display()).as_str())
-        );
     }
 
     #[test]
