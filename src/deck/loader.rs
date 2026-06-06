@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process;
 
 use anyhow::{Context, Result, bail};
 use imagesize::size;
@@ -36,7 +37,7 @@ pub fn load_deck(dir: &Path) -> Result<Deck> {
         }
     }
     if paths.is_empty() {
-        bail!("no markdown slides found");
+        process::exit(0);
     }
     paths.sort_by(|a, b| natural_key(a.file_name(), b.file_name()));
 
